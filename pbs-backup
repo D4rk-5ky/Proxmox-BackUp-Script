@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""
+Proxmox full backup (VMs + CTs) to PBS via vzdump, then publish MQTT status (success OR error).
+
+- Streams output live to terminal
+- Writes logs to file (combined .log and .err)
+- Publishes MQTT JSON payload on BOTH success and failure
+- MQTT uses paho-mqtt (required). Install: pip install paho-mqtt
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import paho.mqtt.client as mqtt  # type: ignore
+except Exception:
+    mqtt = None
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def is_root() -> bool:
+    return os.geteuid() == 0
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def nonempty_file(path: str) -> bool:
+    try:
+        return os.path.exists(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def build_log_paths(log_dir: str, prefix: str) -> Tuple[str, str]:
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    logfile = os.path.join(log_dir, f"{prefix}-{ts}.log")
+    errfile = os.path.join(log_dir, f"{prefix}-{ts}.err")
+    return logfile, errfile
+
+
+def setup_logger(logfile: str) -> logging.Logger:
+    logger = logging.getLogger("pbs_backup")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    # Avoid duplicate handlers if re-imported
+    if logger.handlers:
+        return logger
+
+    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    # Console
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+
+    # File
+    fh = logging.FileHandler(logfile, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    return logger
+
+
+def run_command_stream(
+    cmd: List[str],
+    logger: logging.Logger,
+    logfile: str,
+    errfile: str,
+    timeout: Optional[int] = None,
+    dry_run: bool = False,
+) -> int:
+    """
+    Run a command, stream combined stdout/stderr to terminal in real-time,
+    write the same stream to logfile and errfile.
+    """
+    printable = " ".join(shlex.quote(c) for c in cmd)
+    logger.info("Running: %s", printable)
+
+    ensure_dir(os.path.dirname(logfile))
+    ensure_dir(os.path.dirname(errfile))
+
+    if dry_run:
+        logger.info("DRY-RUN: not executing command.")
+        return 0
+
+    start = time.time()
+
+    with open(logfile, "a", encoding="utf-8") as lf, open(errfile, "a", encoding="utf-8") as ef:
+        lf.write(f"[{now_iso()}] Running: {printable}\n")
+        lf.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                # Terminal (via logger + direct stream-like behavior)
+                # Keep it as INFO lines to mimic real-time output.
+                # Avoid double timestamps by writing raw line to stdout.
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+                # Logs
+                lf.write(line)
+                lf.flush()
+                ef.write(line)
+                ef.flush()
+
+                if timeout is not None and (time.time() - start) > timeout:
+                    proc.kill()
+                    raise TimeoutError(f"Timeout exceeded ({timeout}s)")
+
+            rc = proc.wait()
+            logger.info("Finished (rc=%d)", rc)
+            lf.write(f"[{now_iso()}] Finished (rc={rc})\n")
+            ef.write(f"[{now_iso()}] Finished (rc={rc})\n")
+            return rc
+
+        except Exception as e:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            logger.error("FAILED: %s", e)
+            lf.write(f"[{now_iso()}] ERROR: {e}\n")
+            ef.write(f"[{now_iso()}] ERROR: {e}\n")
+            return 255
+
+
+# -----------------------------
+# MQTT
+# -----------------------------
+def mqtt_publish(
+    *,
+    host: str,
+    port: int,
+    topic: str,
+    payload: Dict[str, Any],
+    username: Optional[str],
+    password: Optional[str],
+    tls: bool,
+    cafile: Optional[str],
+    insecure: bool,
+    client_id: str,
+    retain: bool,
+    qos: int,
+    logger: logging.Logger,
+    timeout_sec: int = 15,
+) -> None:
+    if mqtt is None:
+        raise RuntimeError("paho-mqtt not installed. Install with: pip install paho-mqtt")
+
+    # Paho-mqtt 2.x supports callback_api_version; older versions don't.
+    try:
+        client = mqtt.Client(
+            client_id=client_id,
+            protocol=mqtt.MQTTv311,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        )
+    except Exception:
+        client = mqtt.Client(client_id=client_id, protocol=mqtt.MQTTv311)
+
+    if username:
+        client.username_pw_set(username, password=password)
+
+    if tls:
+        client.tls_set(ca_certs=cafile if cafile else None)
+        if insecure:
+            client.tls_insecure_set(True)
+
+    published = {"ok": False}
+
+    def on_publish(_client, _userdata, mid, *args, **kwargs):
+        published["ok"] = True
+        logger.info("MQTT publish acknowledged (mid=%s)", mid)
+
+    def on_disconnect(_client, _userdata, *args, **kwargs):
+        # paho may pass (rc) or (reason_code, properties) depending on version/API
+        reason = None
+        if args:
+            # often first extra arg is reason_code / rc
+            reason = args[0]
+        else:
+            reason = kwargs.get("reason_code", kwargs.get("rc"))
+        logger.info("MQTT disconnected (reason=%s)", reason)
+
+    try:
+        client.on_publish = on_publish
+        client.on_disconnect = on_disconnect
+    except Exception:
+        pass
+
+    logger.info("Connecting MQTT %s:%d tls=%s ...", host, port, tls)
+    client.connect(host, port, keepalive=30)
+
+    client.loop_start()
+    try:
+        msg = json.dumps(payload, ensure_ascii=False)
+        logger.info("Publishing MQTT topic=%s qos=%s retain=%s payload=%s", topic, qos, retain, msg)
+
+        info = client.publish(topic, msg, qos=qos, retain=retain)
+
+        info.wait_for_publish(timeout=timeout_sec)
+        if not info.is_published() and not published["ok"]:
+            raise TimeoutError(f"MQTT publish not acknowledged within {timeout_sec}s")
+    finally:
+        try:
+            client.disconnect()
+        finally:
+            client.loop_stop()
+
+    logger.info("MQTT published OK")
+
+
+def publish_backup_status(
+    *,
+    rc: int,
+    duration_s: int,
+    node: str,
+    storage: str,
+    log_file: str,
+    err_file: str,
+    mqtt_host: str,
+    mqtt_port: int,
+    mqtt_topic: str,
+    mqtt_user: Optional[str],
+    mqtt_pass: Optional[str],
+    mqtt_tls: bool,
+    mqtt_cafile: Optional[str],
+    mqtt_insecure: bool,
+    mqtt_client_id: str,
+    mqtt_retain: bool,
+    mqtt_qos: int,
+    mqtt_timeout: int,
+    logger: logging.Logger,
+) -> None:
+    status = "success" if rc == 0 else "error"
+    payload: Dict[str, Any] = {
+        "status": status,
+        "rc": rc,
+        "node": node,
+        "storage": storage,
+        "duration_s": duration_s,
+        "ts": now_iso(),
+        "log_file": log_file,
+        "err_file": err_file if nonempty_file(err_file) else None,
+    }
+
+    mqtt_publish(
+        host=mqtt_host,
+        port=mqtt_port,
+        topic=mqtt_topic,
+        payload=payload,
+        username=mqtt_user,
+        password=mqtt_pass,
+        tls=mqtt_tls,
+        cafile=mqtt_cafile,
+        insecure=mqtt_insecure,
+        client_id=mqtt_client_id,
+        retain=mqtt_retain,
+        qos=mqtt_qos,
+        logger=logger,
+        timeout_sec=mqtt_timeout,
+    )
+
+
+# -----------------------------
+# vzdump command
+# -----------------------------
+def build_vzdump_cmd(args: argparse.Namespace) -> List[str]:
+    cmd: List[str] = ["vzdump"]
+
+    # Selection
+    if args.all:
+        cmd.append("--all")
+    else:
+        # user-provided VMIDs
+        cmd += args.vmid
+
+    # Target
+    cmd += ["--storage", args.storage]
+
+    # Options
+    cmd += ["--mode", args.mode]
+    cmd += ["--compress", args.compress]
+    cmd += ["--bwlimit", str(args.bwlimit)]
+
+    if args.notes_template:
+        cmd += ["--notes-template", args.notes_template]
+
+    if args.exclude:
+        for ex in args.exclude:
+            cmd += ["--exclude", str(ex)]
+
+    if args.only_running:
+        cmd += ["--only-running", "1"]
+
+    if args.quiet:
+        cmd += ["--quiet", "1"]
+
+    # Optional vzdump mail knobs (independent from MQTT)
+    if args.mailto:
+        cmd += ["--mailto", args.mailto]
+    if args.mailnotification:
+        cmd += ["--mailnotification", args.mailnotification]
+
+    return cmd
+
+
+# -----------------------------
+# CLI
+# -----------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Run full Proxmox (vzdump) backup to PBS and publish MQTT status (success OR error)."
+    )
+
+    sel = p.add_argument_group("Selection")
+    sel.add_argument("--all", action="store_true", default=True, help="Backup all VMs + CTs (default).")
+    sel.add_argument("--no-all", dest="all", action="store_false", help="Disable --all; use --vmid instead.")
+    sel.add_argument("--vmid", nargs="+", default=[], help="VMID(s) when --no-all is used. Example: --vmid 100 101")
+    sel.add_argument("--exclude", nargs="*", default=[], help="Exclude VMID(s). Example: --exclude 101 102")
+
+    vzd = p.add_argument_group("Backup options")
+    vzd.add_argument("--storage", required=True, help='Proxmox storage target. Example: "PBS-Backup:Datastore1"')
+    vzd.add_argument("--mode", choices=["snapshot", "suspend", "stop"], default="snapshot")
+    vzd.add_argument("--compress", default="zstd", help="Compression (depends on Proxmox). Default: zstd")
+    vzd.add_argument("--bwlimit", type=int, default=0, help="Bandwidth limit in KB/s (0=unlimited).")
+    vzd.add_argument("--only-running", action="store_true", help="Only backup running guests.")
+    vzd.add_argument("--quiet", action="store_true", help="Reduce vzdump output.")
+    vzd.add_argument("--timeout", type=int, default=None, help="Timeout for vzdump in seconds.")
+    vzd.add_argument("--notes-template", default=None, help="Optional vzdump notes template.")
+    vzd.add_argument("--dry-run", action="store_true", help="Print actions but do not execute.")
+
+    mail = p.add_argument_group("vzdump email options (optional)")
+    mail.add_argument("--mailto", default=None, help="vzdump --mailto")
+    mail.add_argument("--mailnotification", default=None, help='vzdump --mailnotification (varies by version)')
+
+    log = p.add_argument_group("Logging")
+    log.add_argument("--log-dir", default="/var/log/pbs-backup", help="Log directory (default: /var/log/pbs-backup)")
+    log.add_argument("--log-prefix", default="pbs-backup", help="Log filename prefix (default: pbs-backup)")
+
+    mqttg = p.add_argument_group("MQTT")
+    mqttg.add_argument("--mqtt-host", required=True, help="MQTT broker host/IP")
+    mqttg.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883)")
+    mqttg.add_argument("--mqtt-topic", required=True, help="MQTT topic (e.g. proxmox/backup/pbs)")
+    mqttg.add_argument("--mqtt-user", default=None, help="MQTT username (optional)")
+    mqttg.add_argument("--mqtt-pass", default=None, help="MQTT password (optional)")
+    mqttg.add_argument("--mqtt-qos", type=int, default=1, choices=[0, 1, 2], help="MQTT QoS (default: 1)")
+    mqttg.add_argument("--mqtt-retain", action="store_true", help="Retain the MQTT message")
+    mqttg.add_argument("--mqtt-timeout", type=int, default=15, help="Seconds to wait for PUBACK (default: 15)")
+    mqttg.add_argument("--mqtt-client-id", default=None, help="MQTT client id (default: auto)")
+
+    tls = p.add_argument_group("MQTT TLS")
+    tls.add_argument("--mqtt-tls", action="store_true", help="Enable TLS")
+    tls.add_argument("--mqtt-cafile", default=None, help="CA file path (optional)")
+    tls.add_argument("--mqtt-insecure", action="store_true", help="Allow insecure TLS (skip hostname verification)")
+
+    return p.parse_args()
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main() -> int:
+    args = parse_args()
+
+    if not is_root():
+        print("ERROR: must run as root (sudo) because vzdump needs privileges.", file=sys.stderr)
+        return 2
+
+    if shutil.which("vzdump") is None:
+        print("ERROR: 'vzdump' not found. Run on a Proxmox VE node.", file=sys.stderr)
+        return 2
+
+    if mqtt is None:
+        print("ERROR: paho-mqtt not installed. Install with: pip install paho-mqtt", file=sys.stderr)
+        return 2
+
+    if not args.all and not args.vmid:
+        print("ERROR: --no-all set but no --vmid provided.", file=sys.stderr)
+        return 2
+
+    ensure_dir(args.log_dir)
+    logfile, errfile = build_log_paths(args.log_dir, args.log_prefix)
+    logger = setup_logger(logfile)
+
+    node = os.uname().nodename
+    client_id = args.mqtt_client_id or f"proxmox-backup-{node}"
+
+    cmd = build_vzdump_cmd(args)
+
+    logger.info("Node=%s Storage=%s Topic=%s", node, args.storage, args.mqtt_topic)
+
+    start_ts = time.time()
+    rc = run_command_stream(
+        cmd,
+        logger=logger,
+        logfile=logfile,
+        errfile=errfile,
+        timeout=args.timeout,
+        dry_run=args.dry_run,
+    )
+    duration_s = int(time.time() - start_ts)
+
+    # Publish MQTT status ALWAYS (success or error)
+    try:
+        publish_backup_status(
+            rc=rc,
+            duration_s=duration_s,
+            node=node,
+            storage=args.storage,
+            log_file=logfile,
+            err_file=errfile,
+            mqtt_host=args.mqtt_host,
+            mqtt_port=args.mqtt_port,
+            mqtt_topic=args.mqtt_topic,
+            mqtt_user=args.mqtt_user,
+            mqtt_pass=args.mqtt_pass,
+            mqtt_tls=args.mqtt_tls,
+            mqtt_cafile=args.mqtt_cafile,
+            mqtt_insecure=args.mqtt_insecure,
+            mqtt_client_id=client_id,
+            mqtt_retain=args.mqtt_retain,
+            mqtt_qos=args.mqtt_qos,
+            mqtt_timeout=args.mqtt_timeout,
+            logger=logger,
+        )
+    except Exception as e:
+        logger.error("MQTT publish failed: %s", e)
+
+    if rc == 0:
+        logger.info("DONE: Backup succeeded. log=%s", logfile)
+        return 0
+
+    if nonempty_file(errfile):
+        logger.error("DONE: Backup FAILED (rc=%d). log=%s err=%s", rc, logfile, errfile)
+    else:
+        logger.error("DONE: Backup FAILED (rc=%d). log=%s", rc, logfile)
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
