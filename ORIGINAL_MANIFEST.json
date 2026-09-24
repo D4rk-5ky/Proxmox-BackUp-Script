@@ -1,0 +1,39 @@
+{
+  "source_archive": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next.zip",
+  "source_archive_sha256": "922078bf8b048324faec640faf5ef71c9d142bd19694c1dd8921b2304722b997",
+  "source_archive_comment": "c34cea5811adba2f9f5cfac4d80eb4632439a277",
+  "version": "0.0.3",
+  "original_files": [
+    {
+      "archive_path": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next/README.md",
+      "relative_path": "README.md",
+      "bytes": 11809,
+      "sha256": "f10cd006b44cd9a17bb39a54275839a028caf06e8aa9e016ef01718d29f1182e",
+      "unix_mode": "0o0",
+      "release_status": "updated"
+    },
+    {
+      "archive_path": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next/pbs-backup",
+      "relative_path": "pbs-backup",
+      "bytes": 14936,
+      "sha256": "7463f9cda9cfad4f3840b9c219597e4c78c91c1a434d6b32e27c790d7788f2f4",
+      "unix_mode": "0o0",
+      "release_status": "updated"
+    }
+  ],
+  "removed_original_files": [],
+  "added_release_files": [
+    "LEGAL.md",
+    "ORIGINAL_MANIFEST.json",
+    "PREVIOUS_RELEASE_MANIFEST.json",
+    "RELEASE_MANIFEST.sha256",
+    "VERIFICATION.md",
+    "VERSION",
+    "VERSIONING.md",
+    "commented_code_map.md",
+    "config.example.sh",
+    "pbs-backup.toml",
+    "requirements.txt",
+    "tests/test_pbs_backup.py"
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "source_archive": "Proxmox-BackUp-Script-0.0.2.zip",
+  "source_archive_sha256": "80870907e4be05809f925cfd447b845b52d4d5abe88d4abc8423e1ed2f4b33ff",
+  "source_version": "0.0.2",
+  "version": "0.0.3",
+  "previous_files": [
+    {
+      "relative_path": "LEGAL.md",
+      "bytes": 1385,
+      "sha256": "a60677aaafa472394e198454788240c91f520b1d778f2952f92e77431c096cd2",
+      "release_status": "unchanged"
+    },
+    {
+      "relative_path": "ORIGINAL_MANIFEST.json",
+      "bytes": 1264,
+      "sha256": "6cbc8c229916fc660cb56e641497d6ff100af35c14cb186e26b8642db89774a3",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "PREVIOUS_RELEASE_MANIFEST.json",
+      "bytes": 2518,
+      "sha256": "1d1fdba8928d0e2b02b0a0dfc8a3678f8b2eaf55566569c37b1135d66ae2fbe4",
+      "release_status": "unchanged"
+    },
+    {
+      "relative_path": "README.md",
+      "bytes": 17085,
+      "sha256": "8b487453f238e6e82feca65dba838e97dc84120a6058f311e8f9d47b45348024",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "RELEASE_MANIFEST.sha256",
+      "bytes": 1078,
+      "sha256": "9e949604f1b797fe018b60a7e99c2da3865d6242d3919b35eee4b1a9f917696f",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "VERIFICATION.md",
+      "bytes": 4744,
+      "sha256": "7f00576953512a0fecd937ed402e3d186bd8cbcb282664fe7f09291cb23e5682",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "VERSION",
+      "bytes": 6,
+      "sha256": "a5dd346546a384362936b97a4c2f5da2d3d253043ea9679aa7b97d89550dfdbd",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "VERSIONING.md",
+      "bytes": 8205,
+      "sha256": "d271600c05dd57c78934c11384c4188184b9856387fe0ae78431347f8aa73568",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "commented_code_map.md",
+      "bytes": 19389,
+      "sha256": "65d7355ba4f1dd40de5aa98c68005e6092b50325d96722858225c364604fd969",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "config.example.sh",
+      "bytes": 2964,
+      "sha256": "98d6aa006fa95a74f686172d8131a4aaebb28423ca48b943753f7dc593b80991",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs-backup",
+      "bytes": 26613,
+      "sha256": "cb64be5b478cdecb531a4e1f641ba70eb92632dcb35aa17668c4f86b041e7c11",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs-backup.toml",
+      "bytes": 6481,
+      "sha256": "12d38a1e23bf25dc7d34678d6bcf8b7eb81efaa5f71cd46ef927b515808707a8",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "requirements.txt",
+      "bytes": 55,
+      "sha256": "c97368f7d2ea08b0dd148971700eb468cd9cb094bde804b94c9b2c9a15a0fc97",
+      "release_status": "unchanged"
+    },
+    {
+      "relative_path": "tests/test_pbs_backup.py",
+      "bytes": 24361,
+      "sha256": "10e99e39fdf894b2e28a7de4e2ea04b6363892d81b7dcfd39ad80923281d3d0e",
+      "release_status": "updated"
+    }
+  ],
+  "removed_previous_files": [],
+  "added_release_files": []
+}

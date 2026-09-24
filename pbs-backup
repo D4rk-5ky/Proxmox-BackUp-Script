@@ -3,24 +3,63 @@
 Proxmox full backup (VMs + CTs) to PBS via vzdump, then publish MQTT status (success OR error).
 
 - Streams output live to terminal
-- Writes logs to file (combined .log and .err)
-- Publishes MQTT JSON payload on BOTH success and failure
+- Loads settings from pbs-backup.toml beside the script
+- Writes full output to .log and error messages only to .err in script-local logs/
+- Attempts MQTT JSON status after actual runs, on success and failure
+- Optional, explicitly labelled MQTT/email previews during dry-run
 - MQTT uses paho-mqtt (required). Install: pip install paho-mqtt
 """
 
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import logging
 import os
+import re
+import selectors
 import shlex
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 from datetime import datetime
+from email.errors import HeaderParseError
+from email.headerregistry import Address
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from typing import Any, Dict, List, Optional, Tuple
+
+__version__ = "0.0.3"
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
+
+# TOML keys use the existing argparse destinations; MQTT drops its repeated prefix.
+CONFIG_SECTIONS = {
+    "selection": ("all", "vmid", "exclude"),
+    "backup": ("storage", "mode", "compress", "bwlimit", "only_running", "quiet",
+               "timeout", "notes_template", "dry_run", "dry_run_mqtt", "dry_run_email"),
+    "mail": ("mailto", "mailnotification"),
+    "logging": ("log_dir", "log_prefix"),
+    "mqtt": ("mqtt_host", "mqtt_port", "mqtt_topic", "mqtt_user", "mqtt_pass",
+             "mqtt_qos", "mqtt_retain", "mqtt_timeout", "mqtt_client_id",
+             "mqtt_tls", "mqtt_cafile", "mqtt_insecure"),
+}
+# Only explicit severity prefixes count as child error messages; INFO/WARN text
+# mentioning errors and ordinary stderr progress must stay out of the error file.
+ERROR_LINE = re.compile(
+    r"^\s*(?:(?:\d+:|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+)*"
+    r"(?:TASK\s+)?(?:ERROR|FATAL|CRITICAL)\s*:", re.IGNORECASE,
+)
 
 try:
     import paho.mqtt.client as mqtt  # type: ignore
@@ -51,20 +90,22 @@ def nonempty_file(path: str) -> bool:
 
 
 def build_log_paths(log_dir: str, prefix: str) -> Tuple[str, str]:
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f") + f"-{os.getpid()}"
     logfile = os.path.join(log_dir, f"{prefix}-{ts}.log")
     errfile = os.path.join(log_dir, f"{prefix}-{ts}.err")
     return logfile, errfile
 
 
-def setup_logger(logfile: str) -> logging.Logger:
+def setup_logger(logfile: str, errfile: str) -> logging.Logger:
+    """Send all records to console/full log and ERROR+ records to the error log."""
     logger = logging.getLogger("pbs_backup")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    # Avoid duplicate handlers if re-imported
-    if logger.handlers:
-        return logger
+    # Repeated in-process runs must not retain another run's file destinations.
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)
 
     fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
@@ -80,7 +121,16 @@ def setup_logger(logfile: str) -> logging.Logger:
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
+    eh = logging.FileHandler(errfile, encoding="utf-8", delay=True)
+    eh.setLevel(logging.ERROR)
+    eh.setFormatter(fmt)
+    logger.addHandler(eh)
     return logger
+
+
+def is_error_line(line: str) -> bool:
+    """Recognize Proxmox severity prefixes, not incidental error words in progress."""
+    return ERROR_LINE.match(line) is not None
 
 
 def run_command_stream(
@@ -93,7 +143,8 @@ def run_command_stream(
 ) -> int:
     """
     Run a command, stream combined stdout/stderr to terminal in real-time,
-    write the same stream to logfile and errfile.
+    preserve all output in logfile and only error-prefixed lines in errfile.
+    The logger from setup_logger also routes wrapper ERROR records to errfile.
     """
     printable = " ".join(shlex.quote(c) for c in cmd)
     logger.info("Running: %s", printable)
@@ -105,55 +156,75 @@ def run_command_stream(
         logger.info("DRY-RUN: not executing command.")
         return 0
 
-    start = time.time()
+    deadline = None if timeout is None else time.monotonic() + timeout
 
     with open(logfile, "a", encoding="utf-8") as lf, open(errfile, "a", encoding="utf-8") as ef:
         lf.write(f"[{now_iso()}] Running: {printable}\n")
         lf.flush()
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-        )
+        pending = ""
 
+        def filter_errors(output: str, final: bool = False) -> None:
+            """Assemble split lines before filtering; flush a final partial error too."""
+            nonlocal pending
+            pending += output
+            lines = pending.split("\n")
+            pending = lines.pop()
+            if final and pending:
+                lines.append(pending)
+                pending = ""
+            for line in lines:
+                if is_error_line(line):
+                    ef.write(line + "\n")
+            ef.flush()
+
+        proc = None
         try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
             assert proc.stdout is not None
-            for line in proc.stdout:
-                # Terminal (via logger + direct stream-like behavior)
-                # Keep it as INFO lines to mimic real-time output.
-                # Avoid double timestamps by writing raw line to stdout.
-                sys.stdout.write(line)
-                sys.stdout.flush()
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            # Read ready bytes instead of blocking on a newline: silent and partial
+            # output must not prevent the deadline from being checked.
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError(f"Timeout exceeded ({timeout}s)")
+                    for key, _ in selector.select(remaining):
+                        data = os.read(key.fd, 65536)
+                        output = decoder.decode(data, final=not data)
+                        sys.stdout.write(output)
+                        sys.stdout.flush()
+                        lf.write(output)
+                        lf.flush()
+                        filter_errors(output, final=not data)
+                        if not data:
+                            selector.unregister(proc.stdout)
 
-                # Logs
-                lf.write(line)
-                lf.flush()
-                ef.write(line)
-                ef.flush()
-
-                if timeout is not None and (time.time() - start) > timeout:
-                    proc.kill()
-                    raise TimeoutError(f"Timeout exceeded ({timeout}s)")
-
-            rc = proc.wait()
+            # A child can close stdout before exiting; keep the deadline here too.
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            rc = proc.wait(timeout=remaining)
             logger.info("Finished (rc=%d)", rc)
             lf.write(f"[{now_iso()}] Finished (rc={rc})\n")
-            ef.write(f"[{now_iso()}] Finished (rc={rc})\n")
+            if rc != 0:
+                logger.error("Backup command failed (rc=%d); see full log for details.", rc)
             return rc
 
         except Exception as e:
-            try:
-                proc.kill()
-            except Exception:
-                pass
             logger.error("FAILED: %s", e)
-            lf.write(f"[{now_iso()}] ERROR: {e}\n")
-            ef.write(f"[{now_iso()}] ERROR: {e}\n")
             return 255
+        finally:
+            try:
+                filter_errors("", final=True)
+            finally:
+                # Even a final log write failure must not skip subprocess cleanup.
+                if proc is not None:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait()
+                    if proc.stdout is not None:
+                        proc.stdout.close()
 
 
 # -----------------------------
@@ -204,13 +275,8 @@ def mqtt_publish(
         logger.info("MQTT publish acknowledged (mid=%s)", mid)
 
     def on_disconnect(_client, _userdata, *args, **kwargs):
-        # paho may pass (rc) or (reason_code, properties) depending on version/API
-        reason = None
-        if args:
-            # often first extra arg is reason_code / rc
-            reason = args[0]
-        else:
-            reason = kwargs.get("reason_code", kwargs.get("rc"))
+        # VERSION2 adds disconnect_flags before reason_code; VERSION1 starts at rc.
+        reason = args[1] if len(args) >= 3 else args[0] if args else kwargs.get("reason_code", kwargs.get("rc"))
         logger.info("MQTT disconnected (reason=%s)", reason)
 
     try:
@@ -262,11 +328,12 @@ def publish_backup_status(
     mqtt_qos: int,
     mqtt_timeout: int,
     logger: logging.Logger,
+    dry_run: bool = False,
 ) -> None:
-    status = "success" if rc == 0 else "error"
+    status = "dry-run" if dry_run else "success" if rc == 0 else "error"
     payload: Dict[str, Any] = {
         "status": status,
-        "rc": rc,
+        "rc": None if dry_run else rc,
         "node": node,
         "storage": storage,
         "duration_s": duration_s,
@@ -275,10 +342,13 @@ def publish_backup_status(
         "err_file": err_file if nonempty_file(err_file) else None,
     }
 
+    if dry_run:
+        payload.update(dry_run=True, backup_executed=False, preview_rc=rc)
+
     mqtt_publish(
         host=mqtt_host,
         port=mqtt_port,
-        topic=mqtt_topic,
+        topic=mqtt_topic + "/dry-run" if dry_run else mqtt_topic,
         payload=payload,
         username=mqtt_user,
         password=mqtt_pass,
@@ -286,7 +356,7 @@ def publish_backup_status(
         cafile=mqtt_cafile,
         insecure=mqtt_insecure,
         client_id=mqtt_client_id,
-        retain=mqtt_retain,
+        retain=False if dry_run else mqtt_retain,
         qos=mqtt_qos,
         logger=logger,
         timeout_sec=mqtt_timeout,
@@ -294,8 +364,100 @@ def publish_backup_status(
 
 
 # -----------------------------
+# Dry-run email (never invokes vzdump)
+# -----------------------------
+def dry_run_recipients(value: Optional[str]) -> List[str]:
+    """Validate comma-separated bare addresses/local aliases without header injection."""
+    if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("Dry-run email requires mail.mailto with comma-separated addresses or local aliases.")
+    recipients = [item.strip() for item in value.split(",")]
+    for recipient in recipients:
+        if not recipient or not recipient.isascii() or recipient.startswith("-"):
+            raise ValueError("Dry-run email needs nonempty ASCII recipients, not command options.")
+        if "@" not in recipient:
+            if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", recipient):
+                raise ValueError("Dry-run email needs bare addresses or simple local aliases, separated by commas.")
+        else:
+            try:
+                address = Address(addr_spec=recipient)
+                if not address.username or not address.domain:
+                    raise ValueError("incomplete address")
+            except (ValueError, HeaderParseError, IndexError):
+                # Older Python email parsers can raise IndexError for an empty domain.
+                raise ValueError("Invalid dry-run email address; use bare addresses, not display names.") from None
+    return recipients
+
+
+def send_dry_run_email(
+    *, mailto: str, node: str, storage: str, cmd: List[str],
+    log_file: str, err_file: str, logger: logging.Logger,
+) -> None:
+    """Submit a labelled preview to the local mail service, never a backup command."""
+    recipients = dry_run_recipients(mailto)
+    sendmail = shutil.which("sendmail")
+    if sendmail is None and os.access("/usr/sbin/sendmail", os.X_OK):
+        sendmail = "/usr/sbin/sendmail"
+    if sendmail is None:
+        raise RuntimeError("sendmail not found; configure the host mail service for dry-run email.")
+    message = EmailMessage()
+    message["From"] = "PBS Backup <root>"
+    message["To"] = ", ".join(recipients)
+    message["Subject"] = f"[DRY-RUN] Proxmox backup preview on {node} - NO BACKUP EXECUTED"
+    message["Date"] = formatdate(localtime=True)
+    message["Message-ID"] = make_msgid()
+    message.set_content(
+        "DRY-RUN ONLY: NO BACKUP EXECUTED. This is a notification test, not a backup result.\n\n"
+        f"Node: {node}\nStorage: {storage}\nTime: {now_iso()}\n"
+        f"Full log: {log_file}\nError log (if nonempty): {err_file}\n\n"
+        f"Planned command (NOT executed):\n{shlex.join(cmd)}\n"
+    )
+    # -t reads only our validated To header; -i prevents dot-only body termination.
+    # No recipient, config value, or planned backup command is executed by a shell.
+    result = subprocess.run(
+        [sendmail, "-i", "-t"], input=message.as_bytes(),
+        capture_output=True, timeout=30, check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"sendmail failed (rc={result.returncode}): {detail}")
+    logger.info("DRY-RUN email accepted by local mail service; inbox delivery is not confirmed.")
+
+
+# -----------------------------
 # vzdump command
 # -----------------------------
+def resolve_selection(args: argparse.Namespace) -> None:
+    """Resolve exclusions and optional running-state selection before building argv."""
+    excluded = set(args.exclude)
+    if not args.all:
+        args.vmid = [vmid for vmid in args.vmid if vmid not in excluded]
+        if not args.vmid:
+            raise ValueError("No selected guests remain after --exclude.")
+        args.exclude = []
+
+    if args.only_running:
+        # vzdump has no --only-running flag. Query the local node without changing it.
+        if shutil.which("pvesh") is None:
+            raise ValueError("--only-running requires 'pvesh' on the Proxmox VE node.")
+        node = os.uname().nodename.split(".")[0]
+        result = subprocess.run(
+            ["pvesh", "get", "/cluster/resources", "--type", "vm", "--output-format", "json"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        guests = json.loads(result.stdout)
+        if not isinstance(guests, list) or any(not isinstance(guest, dict) for guest in guests):
+            raise ValueError("Unexpected pvesh guest inventory; refusing to start backup.")
+        running = {str(guest["vmid"]) for guest in guests
+                   if guest.get("node") == node and guest.get("status") == "running"
+                   and guest.get("type") in ("qemu", "lxc")}
+        selected = running - excluded if args.all else set(args.vmid) & running
+        if not selected:
+            raise ValueError("No running guests match the selection; no backup started.")
+        args.vmid = sorted(selected, key=int)
+        args.all = False
+        args.exclude = []
+
+
 def build_vzdump_cmd(args: argparse.Namespace) -> List[str]:
     cmd: List[str] = ["vzdump"]
 
@@ -305,6 +467,7 @@ def build_vzdump_cmd(args: argparse.Namespace) -> List[str]:
     else:
         # user-provided VMIDs
         cmd += args.vmid
+        cmd += ["--all", "0"]
 
     # Target
     cmd += ["--storage", args.storage]
@@ -318,11 +481,7 @@ def build_vzdump_cmd(args: argparse.Namespace) -> List[str]:
         cmd += ["--notes-template", args.notes_template]
 
     if args.exclude:
-        for ex in args.exclude:
-            cmd += ["--exclude", str(ex)]
-
-    if args.only_running:
-        cmd += ["--only-running", "1"]
+        cmd += ["--exclude", ",".join(args.exclude)]
 
     if args.quiet:
         cmd += ["--quiet", "1"]
@@ -339,53 +498,150 @@ def build_vzdump_cmd(args: argparse.Namespace) -> List[str]:
 # -----------------------------
 # CLI
 # -----------------------------
+def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
+    """Read strict TOML defaults using existing CLI types, choices, and destinations."""
+    if tomllib is None:
+        parser.error("TOML requires Python 3.11+ or 'tomli' on Python 3.9/3.10 (pip install tomli).")
+    try:
+        with path.open("rb") as source:
+            data = tomllib.load(source)
+    except OSError:
+        parser.error(f"Cannot read TOML config: {path}. Provide pbs-backup.toml or use --config PATH.")
+    except ValueError:
+        # Do not echo parser excerpts that could contain a password.
+        parser.error(f"Invalid TOML syntax in {path}; check quoting, tables, and duplicate keys.")
+    actions = {action.dest: action for action in parser._actions}
+    defaults: Dict[str, Any] = {}
+    for section, values in data.items():
+        if section not in CONFIG_SECTIONS or not isinstance(values, dict):
+            parser.error(f"Unknown or invalid TOML section: {section}.")
+        keys = {dest.removeprefix("mqtt_") if section == "mqtt" else dest: dest
+                for dest in CONFIG_SECTIONS[section]}
+        for key, value in values.items():
+            label = f"{section}.{key}"
+            if key not in keys:
+                parser.error(f"Unknown TOML option: {label}.")
+            dest = keys[key]
+            action = actions[dest]
+            if dest in ("vmid", "exclude"):
+                if not isinstance(value, list) or any(type(item) not in (str, int) for item in value):
+                    parser.error(f"{label} must be an array of guest IDs (strings or integers).")
+                value = [str(item) for item in value]
+            elif isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+                if type(value) is not bool:
+                    parser.error(f"{label} must be true or false (without quotes).")
+            elif action.type is int:
+                if type(value) is not int:
+                    parser.error(f"{label} must be an integer.")
+                if dest == "timeout" and value == 0:
+                    value = None  # TOML has no null; zero means disabled in the config only.
+            else:
+                if not isinstance(value, str):
+                    parser.error(f"{label} must be a quoted string.")
+                if action.default is None and value == "":
+                    value = None
+            if action.choices is not None and value not in action.choices:
+                parser.error(f"{label} must be one of: {', '.join(map(str, action.choices))}.")
+            defaults[dest] = value
+    if defaults.get("mqtt_cafile"):
+        ca = Path(defaults["mqtt_cafile"]).expanduser()
+        defaults["mqtt_cafile"] = str(ca if ca.is_absolute() else path.parent / ca)
+    return defaults
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run full Proxmox (vzdump) backup to PBS and publish MQTT status (success OR error)."
+        description="Load settings from pbs-backup.toml beside this script. Optional flags override TOML. Dry-run notifications require explicit opt-in.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    p.add_argument("--config", default=str(SCRIPT_DIR / "pbs-backup.toml"), help="TOML settings file; relative paths use the working directory.")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sel = p.add_argument_group("Selection")
-    sel.add_argument("--all", action="store_true", default=True, help="Backup all VMs + CTs (default).")
-    sel.add_argument("--no-all", dest="all", action="store_false", help="Disable --all; use --vmid instead.")
+    selection = sel.add_mutually_exclusive_group()
+    selection.add_argument("--all", action="store_true", default=True, help="Backup all VMs + CTs (default).")
+    selection.add_argument("--no-all", dest="all", action="store_false", help="Select only --vmid guests (all-guests default: %(default)s); requires --vmid.")
     sel.add_argument("--vmid", nargs="+", default=[], help="VMID(s) when --no-all is used. Example: --vmid 100 101")
-    sel.add_argument("--exclude", nargs="*", default=[], help="Exclude VMID(s). Example: --exclude 101 102")
+    sel.add_argument("--exclude", nargs="+", default=[], help="Exclude VMID(s) from all or selected guests. Example: --exclude 101 102")
 
     vzd = p.add_argument_group("Backup options")
-    vzd.add_argument("--storage", required=True, help='Proxmox storage target. Example: "PBS-Backup:Datastore1"')
-    vzd.add_argument("--mode", choices=["snapshot", "suspend", "stop"], default="snapshot")
-    vzd.add_argument("--compress", default="zstd", help="Compression (depends on Proxmox). Default: zstd")
-    vzd.add_argument("--bwlimit", type=int, default=0, help="Bandwidth limit in KB/s (0=unlimited).")
-    vzd.add_argument("--only-running", action="store_true", help="Only backup running guests.")
-    vzd.add_argument("--quiet", action="store_true", help="Reduce vzdump output.")
-    vzd.add_argument("--timeout", type=int, default=None, help="Timeout for vzdump in seconds.")
-    vzd.add_argument("--notes-template", default=None, help="Optional vzdump notes template.")
-    vzd.add_argument("--dry-run", action="store_true", help="Print actions but do not execute.")
+    vzd.add_argument("--storage", default=None, help='Configured Proxmox VE storage ID, e.g. "pbs-storage" (PBS datastore is configured in PVE).')
+    vzd.add_argument("--mode", choices=["snapshot", "suspend", "stop"], default="snapshot", help="vzdump backup mode; suspend/stop can interrupt guests.")
+    vzd.add_argument("--compress", default="zstd", help="Compression value passed to installed vzdump; support depends on PVE/backend.")
+    vzd.add_argument("--bwlimit", type=int, default=0, help="I/O bandwidth limit in KiB/s (0=unlimited).")
+    vzd.add_argument("--only-running", action="store_true", help="Use pvesh to select guests running on this node at query time; fail if none match.")
+    vzd.add_argument("--quiet", action="store_true", help="Reduce vzdump output; wrapper and MQTT logs remain visible.")
+    vzd.add_argument("--timeout", type=int, default=None, help="Positive seconds before killing the direct vzdump process; otherwise use TOML timeout (0 disables it).")
+    vzd.add_argument("--notes-template", default=None, help="vzdump template, e.g. '{{guestname}} on {{node}}'; passed literally.")
+    vzd.add_argument("--dry-run", action="store_true", help="Preview without backup; notifications are off unless dry-run-mqtt/email is enabled; preflight checks remain.")
+
+    vzd.add_argument("--dry-run-mqtt", action="store_true", help="During dry-run only, publish a labelled non-retained preview to <mqtt-topic>/dry-run.")
+    vzd.add_argument("--dry-run-email", action="store_true", help="During dry-run only, submit a labelled preview email via local sendmail to --mailto (30-second submission timeout).")
 
     mail = p.add_argument_group("vzdump email options (optional)")
-    mail.add_argument("--mailto", default=None, help="vzdump --mailto")
-    mail.add_argument("--mailnotification", default=None, help='vzdump --mailnotification (varies by version)')
+    mail.add_argument("--mailto", default=None, help="vzdump email recipients; depends on PVE notification configuration, independent of MQTT.")
+    mail.add_argument("--mailnotification", default=None, help='vzdump email policy, e.g. always or failure; passed through to installed PVE.')
 
     log = p.add_argument_group("Logging")
-    log.add_argument("--log-dir", default="/var/log/pbs-backup", help="Log directory (default: /var/log/pbs-backup)")
-    log.add_argument("--log-prefix", default="pbs-backup", help="Log filename prefix (default: pbs-backup)")
+    log.add_argument("--log-dir", default="logs", help="Log directory; relative paths are anchored beside the script; created automatically.")
+    log.add_argument("--log-prefix", default="pbs-backup", help="Log filename prefix, without directory components.")
 
     mqttg = p.add_argument_group("MQTT")
-    mqttg.add_argument("--mqtt-host", required=True, help="MQTT broker host/IP")
-    mqttg.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (default: 1883)")
-    mqttg.add_argument("--mqtt-topic", required=True, help="MQTT topic (e.g. proxmox/backup/pbs)")
+    mqttg.add_argument("--mqtt-host", default=None, help="MQTT broker host/IP")
+    mqttg.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (1..65535); TLS does not change the port automatically.")
+    mqttg.add_argument("--mqtt-topic", default=None, help="MQTT topic (e.g. proxmox/backup/pbs)")
     mqttg.add_argument("--mqtt-user", default=None, help="MQTT username (optional)")
-    mqttg.add_argument("--mqtt-pass", default=None, help="MQTT password (optional)")
-    mqttg.add_argument("--mqtt-qos", type=int, default=1, choices=[0, 1, 2], help="MQTT QoS (default: 1)")
-    mqttg.add_argument("--mqtt-retain", action="store_true", help="Retain the MQTT message")
-    mqttg.add_argument("--mqtt-timeout", type=int, default=15, help="Seconds to wait for PUBACK (default: 15)")
-    mqttg.add_argument("--mqtt-client-id", default=None, help="MQTT client id (default: auto)")
+    mqttg.add_argument("--mqtt-pass", default=None, help="MQTT password; requires --mqtt-user; visible in process arguments.")
+    mqttg.add_argument("--mqtt-qos", type=int, default=1, choices=[0, 1, 2], help="QoS: 0 local send, 1 at least once, 2 exactly once at protocol level.")
+    mqttg.add_argument("--mqtt-retain", action="store_true", help="Broker retains final status for later subscribers; omission does not clear old retained status.")
+    mqttg.add_argument("--mqtt-timeout", type=int, default=15, help="Positive seconds to wait for publish completion; not a total connection timeout.")
+    mqttg.add_argument("--mqtt-client-id", default=None, help="MQTT client ID; auto is proxmox-backup-<node>; use unique IDs for concurrent clients.")
 
     tls = p.add_argument_group("MQTT TLS")
-    tls.add_argument("--mqtt-tls", action="store_true", help="Enable TLS")
-    tls.add_argument("--mqtt-cafile", default=None, help="CA file path (optional)")
-    tls.add_argument("--mqtt-insecure", action="store_true", help="Allow insecure TLS (skip hostname verification)")
+    tls.add_argument("--mqtt-tls", action="store_true", help="Enable verified TLS; choose the broker TLS port explicitly (often 8883).")
+    tls.add_argument("--mqtt-cafile", default=None, help="Custom trusted CA file; requires --mqtt-tls; omitted uses system trust.")
+    tls.add_argument("--mqtt-insecure", action="store_true", help="Disable TLS hostname verification; requires --mqtt-tls; unsafe for production.")
 
-    return p.parse_args()
+    initial = p.parse_args()  # Help/version exit here without reading config or secrets.
+    config_path = Path(initial.config).expanduser().resolve()
+    p.set_defaults(**load_config(config_path, p))
+    args = p.parse_args()
+    args.config = str(config_path)
+    if args.all and args.vmid:
+        p.error("--vmid requires --no-all; refusing to select all guests.")
+    if not args.all and not args.vmid:
+        p.error("--no-all requires --vmid.")
+    for option in ("vmid", "exclude"):
+        values = getattr(args, option)
+        if any(not value.isascii() or not value.isdecimal() or int(value) <= 0 for value in values):
+            p.error(f"--{option} requires positive numeric guest IDs.")
+        setattr(args, option, [str(int(value)) for value in values])
+    if args.bwlimit < 0:
+        p.error("--bwlimit must be zero or positive.")
+    if args.timeout is not None and args.timeout <= 0:
+        p.error("--timeout must be positive; use backup.timeout = 0 in TOML for no deadline.")
+    if args.mqtt_timeout <= 0 or not 1 <= args.mqtt_port <= 65535:
+        p.error("--mqtt-timeout must be positive and --mqtt-port must be 1..65535.")
+    if any(not value or not value.strip() for value in (args.storage, args.mqtt_host, args.mqtt_topic)):
+        p.error("Set backup.storage, mqtt.host and mqtt.topic in TOML (or supply their CLI overrides).")
+    if any(char in args.mqtt_topic for char in ("+", "#", "\x00")):
+        p.error("--mqtt-topic must be a publish topic without wildcards or NUL.")
+    if (args.mqtt_cafile or args.mqtt_insecure) and not args.mqtt_tls:
+        p.error("--mqtt-cafile and --mqtt-insecure require --mqtt-tls.")
+    if args.mqtt_pass is not None and not args.mqtt_user:
+        p.error("--mqtt-pass requires --mqtt-user.")
+    if not args.log_prefix or args.log_prefix in (".", "..") or os.path.basename(args.log_prefix) != args.log_prefix:
+        p.error("--log-prefix must be a filename prefix, without directory components.")
+    if args.dry_run and args.dry_run_email:
+        try:
+            dry_run_recipients(args.mailto)
+        except ValueError as e:
+            p.error(str(e))
+    if not args.log_dir.strip():
+        p.error("logging.log_dir / --log-dir must not be empty.")
+    directory = Path(args.log_dir).expanduser()
+    args.log_dir = str(directory if directory.is_absolute() else SCRIPT_DIR / directory)
+    return args
 
 
 # -----------------------------
@@ -394,25 +650,31 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    try:
+        ensure_dir(args.log_dir)
+        logfile, errfile = build_log_paths(args.log_dir, args.log_prefix)
+        logger = setup_logger(logfile, errfile)
+    except OSError as e:
+        print(f"ERROR: Cannot initialize logs: {e}", file=sys.stderr)
+        return 2
+
     if not is_root():
-        print("ERROR: must run as root (sudo) because vzdump needs privileges.", file=sys.stderr)
+        logger.error("Must run as root (sudo) because vzdump needs privileges.")
         return 2
 
     if shutil.which("vzdump") is None:
-        print("ERROR: 'vzdump' not found. Run on a Proxmox VE node.", file=sys.stderr)
+        logger.error("'vzdump' not found. Run on a Proxmox VE node.")
         return 2
 
     if mqtt is None:
-        print("ERROR: paho-mqtt not installed. Install with: pip install paho-mqtt", file=sys.stderr)
+        logger.error("paho-mqtt not installed. Install with: pip install paho-mqtt")
         return 2
 
-    if not args.all and not args.vmid:
-        print("ERROR: --no-all set but no --vmid provided.", file=sys.stderr)
+    try:
+        resolve_selection(args)
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as e:
+        logger.error("Guest selection failed: %s", e)
         return 2
-
-    ensure_dir(args.log_dir)
-    logfile, errfile = build_log_paths(args.log_dir, args.log_prefix)
-    logger = setup_logger(logfile)
 
     node = os.uname().nodename
     client_id = args.mqtt_client_id or f"proxmox-backup-{node}"
@@ -421,7 +683,7 @@ def main() -> int:
 
     logger.info("Node=%s Storage=%s Topic=%s", node, args.storage, args.mqtt_topic)
 
-    start_ts = time.time()
+    start_ts = time.monotonic()
     rc = run_command_stream(
         cmd,
         logger=logger,
@@ -430,33 +692,55 @@ def main() -> int:
         timeout=args.timeout,
         dry_run=args.dry_run,
     )
-    duration_s = int(time.time() - start_ts)
+    duration_s = int(time.monotonic() - start_ts)
 
-    # Publish MQTT status ALWAYS (success or error)
-    try:
-        publish_backup_status(
-            rc=rc,
-            duration_s=duration_s,
-            node=node,
-            storage=args.storage,
-            log_file=logfile,
-            err_file=errfile,
-            mqtt_host=args.mqtt_host,
-            mqtt_port=args.mqtt_port,
-            mqtt_topic=args.mqtt_topic,
-            mqtt_user=args.mqtt_user,
-            mqtt_pass=args.mqtt_pass,
-            mqtt_tls=args.mqtt_tls,
-            mqtt_cafile=args.mqtt_cafile,
-            mqtt_insecure=args.mqtt_insecure,
-            mqtt_client_id=client_id,
-            mqtt_retain=args.mqtt_retain,
-            mqtt_qos=args.mqtt_qos,
-            mqtt_timeout=args.mqtt_timeout,
-            logger=logger,
-        )
-    except Exception as e:
-        logger.error("MQTT publish failed: %s", e)
+    mqtt_result = "disabled"
+    email_result = "disabled"
+    if args.dry_run and args.dry_run_email:
+        try:
+            send_dry_run_email(
+                mailto=args.mailto, node=node, storage=args.storage, cmd=cmd,
+                log_file=logfile, err_file=errfile, logger=logger,
+            )
+            email_result = "submitted"
+        except Exception as e:
+            email_result = "failed"
+            logger.error("Dry-run email failed: %s", e)
+
+    # Each requested channel is attempted independently; never publish backup success for a preview.
+    if not args.dry_run or args.dry_run_mqtt:
+        try:
+            publish_backup_status(
+                rc=rc,
+                duration_s=duration_s,
+                node=node,
+                storage=args.storage,
+                log_file=logfile,
+                err_file=errfile,
+                mqtt_host=args.mqtt_host,
+                mqtt_port=args.mqtt_port,
+                mqtt_topic=args.mqtt_topic,
+                mqtt_user=args.mqtt_user,
+                mqtt_pass=args.mqtt_pass,
+                mqtt_tls=args.mqtt_tls,
+                mqtt_cafile=args.mqtt_cafile,
+                mqtt_insecure=args.mqtt_insecure,
+                mqtt_client_id=client_id,
+                mqtt_retain=args.mqtt_retain,
+                mqtt_qos=args.mqtt_qos,
+                mqtt_timeout=args.mqtt_timeout,
+                logger=logger,
+                dry_run=args.dry_run,
+            )
+            mqtt_result = "published"
+        except Exception as e:
+            mqtt_result = "failed"
+            logger.error("MQTT publish failed: %s", e)
+
+
+    if args.dry_run:
+        logger.info("DONE: Dry-run; no backup executed. MQTT=%s Email=%s log=%s", mqtt_result, email_result, logfile)
+        return rc or (3 if "failed" in (mqtt_result, email_result) else 0)
 
     if rc == 0:
         logger.info("DONE: Backup succeeded. log=%s", logfile)

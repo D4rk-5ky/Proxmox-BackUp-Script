@@ -1,0 +1,162 @@
+# Proxmox → PBS backup with MQTT status — complete configuration
+# Automatically loaded from beside the real pbs-backup script (not your shell's cwd).
+# Edit this file, then run: sudo ./pbs-backup
+# Alternative file: sudo ./pbs-backup --config /path/to/pbs-backup.toml
+# CLI settings remain optional overrides: flags > this file > built-in defaults.
+# Inspection only: ./pbs-backup --help (or -h) and ./pbs-backup --version.
+# --config, --help and --version select/inspect the program, so are not TOML keys.
+# Unknown sections/keys and wrong value types are rejected before any backup.
+# Strings need quotes; booleans are true/false; guest lists are arrays.
+# Empty optional strings mean unset. timeout = 0 means no backup deadline.
+# No shell commands or environment-variable expansion occurs in TOML values.
+# Protect this file if adding an MQTT password: chmod 600 pbs-backup.toml
+# AI-assisted / vibe-coded experimental software. Use at your own risk.
+
+[selection]
+# --all / --no-all: true selects all VMs and containers on this node (default).
+# To select specific guests, set all = false AND fill vmid below.
+# all = true with nonempty vmid is rejected to prevent accidental broad selection.
+all = true
+
+# --vmid: guest IDs, e.g. [100, 101] or ["100", "101"]. Default: [].
+# Requires all = false. Positive numeric IDs only; 0100 as a string becomes 100.
+vmid = []
+
+# --exclude: remove these IDs from either all guests or the explicit selection.
+# Example: [105, 106]. Default: []. An empty resulting explicit selection fails.
+exclude = []
+
+[backup]
+# --storage: REQUIRED PVE storage ID configured to use your PBS datastore.
+# Example: "pbs-storage". Do not put "storage:datastore" here.
+# Empty deliberately blocks execution until you choose your own destination.
+storage = ""
+
+# --mode: "snapshot" (default), "suspend", or "stop".
+# suspend/stop can interrupt guests; behavior depends on the guest/backend.
+mode = "snapshot"
+
+# --compress: compression value passed to installed vzdump. Default: "zstd".
+# Support/effect depends on Proxmox version and storage backend.
+compress = "zstd"
+
+# --bwlimit: nonnegative I/O bandwidth limit in KiB/s. 0 = unlimited (default).
+# Example: 250000. This is an integer, not a quoted string.
+bwlimit = 0
+
+# --only-running: select local QEMU/LXC guests reported running by pvesh.
+# Default: false. Requires pvesh; inventory query has a 30-second deadline.
+# Applies existing selection/exclusions. No matches or query failure stops the run.
+# State may change after querying. This read-only query also occurs in dry-run.
+only_running = false
+
+# --quiet: reduce vzdump progress output. Default: false.
+# Script/MQTT logging and error logging remain enabled.
+quiet = false
+
+# --timeout: backup subprocess deadline in seconds. Here 0 = no deadline (default).
+# Example: 14400. A positive value covers silent output and waiting for exit.
+# Expiry kills/reaps only the directly launched process; PVE workers may continue.
+# CLI --timeout still requires a positive integer; omit it to use this TOML value.
+timeout = 0
+
+# --notes-template: optional literal Proxmox notes template. Empty = omitted.
+# Example: "{{guestname}} on {{node}}"; also {{vmid}} and {{cluster}}.
+notes_template = ""
+
+# --dry-run: true previews with local logs but NEVER executes a backup.
+# MQTT/email are off unless the separate opt-ins below are enabled.
+# This distributed example uses true for review; built-in default remains false.
+# Root/vzdump/Paho checks still apply. Set false after reviewing the preview.
+dry_run = true
+
+# --dry-run-mqtt: during dry-run only, send a clearly labelled MQTT preview.
+# Default: false. Uses [mqtt] broker/auth/TLS/QoS/timeout, topic + "/dry-run",
+# and retain=false even if mqtt.retain=true. status="dry-run", rc=null,
+# dry_run=true, backup_executed=false; never reports a successful backup.
+# Ignored during real backups. Does not enable dry_run itself.
+dry_run_mqtt = false
+
+# --dry-run-email: during dry-run only, submit a clearly labelled test email.
+# Default: false. Requires [mail].mailto and a configured local sendmail service.
+# Uses bare comma-separated email addresses or simple local aliases (e.g. root).
+# Submission timeout: 30 seconds. Subject/body say NO BACKUP EXECUTED.
+# Independent of dry_run_mqtt; real vzdump email behavior is unchanged.
+# mailnotification does not suppress this explicitly requested test message.
+# A failed requested notification returns exit 3; the other channel is still tried.
+# Ignored during real backups. Does not enable dry_run itself.
+dry_run_email = false
+
+[mail]
+# --mailto: optional Proxmox email recipients, e.g. "admin@example.com".
+# Empty = omitted (default). Requires configured PVE notification delivery.
+# Real backups: independent of MQTT; PVE notification-system mode may ignore it.
+# Dry-run email: required when backup.dry_run_email=true. Reuses these recipients
+# with local sendmail; PVE user IDs are not resolved through PVE notifications.
+mailto = ""
+
+# --mailnotification: optional policy passed through to installed Proxmox.
+# Common values: "always" or "failure". Empty = host policy (default).
+mailnotification = ""
+
+[logging]
+# --log-dir: created automatically. Default "logs" means a logs/ folder BESIDE
+# the real script, regardless of working directory or --config file location.
+# Any relative path is script-relative; an absolute path explicitly overrides it.
+# .log keeps all output; .err contains explicit error messages only.
+log_dir = "logs"
+
+# --log-prefix: filename prefix, without directories. Default: "pbs-backup".
+# Files include local date/time, microseconds and PID to separate concurrent runs.
+# Example: "pve1-nightly". No automatic log rotation or deletion is performed.
+log_prefix = "pbs-backup"
+
+[mqtt]
+# --mqtt-host: REQUIRED broker hostname/IP, e.g. "mqtt.example.lan".
+# Empty blocks execution. Never include a URL scheme such as mqtt://.
+host = ""
+
+# --mqtt-port: integer 1..65535. Default: 1883.
+# TLS does not change this automatically; often set 8883 when tls = true.
+port = 1883
+
+# --mqtt-topic: REQUIRED nonempty publish topic, e.g. "proxmox/backup/pve1".
+# +/# wildcards and NUL are rejected. Empty blocks execution.
+topic = ""
+
+# --mqtt-user: optional broker username. Empty = anonymous (default).
+user = ""
+
+# --mqtt-pass: optional password. Empty = unset (default); requires user when set.
+# TOML keeps this off the command line, but this file is still plaintext.
+# For backslashes, use TOML single quotes (literal strings) where appropriate.
+pass = ""
+
+# --mqtt-qos: 0 = local send, 1 = at least once (default), 2 = exactly once
+# at MQTT protocol level. QoS 0 does not provide a broker acknowledgement.
+qos = 1
+
+# --mqtt-retain: ask broker to retain final status for later subscribers.
+# Default: false. Setting false does not erase a previously retained message.
+retain = false
+
+# --mqtt-timeout: positive seconds waiting for publish completion. Default: 15.
+# Does not bound DNS, connection establishment, or the entire MQTT operation.
+timeout = 15
+
+# --mqtt-client-id: optional client ID. Empty = "proxmox-backup-<node>".
+# Use unique IDs for concurrent MQTT clients, e.g. "pve1-nightly".
+client_id = ""
+
+# --mqtt-tls: enable TLS with certificate and hostname verification.
+# Default: false. Choose the matching broker port explicitly above.
+tls = false
+
+# --mqtt-cafile: optional trusted CA file; requires tls = true.
+# Empty = system trust (default). A relative TOML path is relative to THIS config
+# file; an absolute path stays absolute. Example: "certs/backup-ca.pem".
+cafile = ""
+
+# --mqtt-insecure: skip TLS hostname verification; requires tls = true.
+# Default: false. Unsafe for production; certificate trust checks still apply.
+insecure = false
