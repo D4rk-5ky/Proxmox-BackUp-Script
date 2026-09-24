@@ -1,41 +1,27 @@
-# Release verification — 0.0.3
+# Release verification — 0.0.4
 
-The full original project and the prior release were inspected before edits. This release advances exactly one patch step from 0.0.2. The original input and previous ZIP remain untouched.
+This release advances one patch step from verified 0.0.3. The existing source, tests, configuration, documentation and manifests were inspected before edits. No original or prior-release file path is removed. This release adds `.gitignore` and `config.example.toml`.
 
-## Local checks
+## Verified locally
 
-- **42 offline regression tests pass on Python 3.12.14** using standard-library `tomllib`.
-- **The same 42 tests pass on Python 3.9.6** using Tomli 2.4.1 from the locally bundled pip vendor directory, supplied only through the test process's `PYTHONPATH`. No vendored dependency is included in the project. The fallback was tested with the locally available genuine Tomli parser.
-- Python in-memory compilation passes for the app and test module without generating `.pyc` files.
-- CLI help/version work without config/Paho/TOML support; missing config, invalid syntax, bad types/choices/keys, and missing destinations fail before any backup. Error diagnostics do not echo secret-bearing TOML excerpts.
-- The complete shipped TOML parses, contains all **30 operational options**, and comments every value. Required destinations are deliberately empty and dry-run is enabled for initial setup.
-- Config-only startup, optional CLI precedence, relative path rules, and startup from a different working directory are covered. A configured default no-flags preview creates `logs/` beside the script and invokes neither a backup nor notifications.
-- Success output, INFO/WARN on stderr, and incidental error words stay out of `.err`. Explicit error prefixes, split chunks/final fragments, command failure summaries, runtime preflight, and MQTT failures enter `.err`; full output remains in `.log`.
-- Silent/partial/closed-pipe subprocess deadlines, launch failures, exclusion/running-guest selection, original defaults/preflight gates, dry-run isolation, payload mapping, and mocked Paho v1/v2 cleanup remain covered.
-- Documentation coverage checks verify **35 CLI spellings**, **30 TOML keys**, **20 application functions** including nested callbacks, and every test helper/method. Original legal/vibe-coding notices are present verbatim in both `LEGAL.md` and README.
-- Bash syntax and the retained override example are checked. Version, archive name and change record agree on 0.0.3; the next version is 0.0.4, with 99 → next minor's 0 rollover.
+- All **46 offline regression tests pass on Python 3.12.14 and Python 3.9.6**. Python 3.12 uses standard-library tomllib; Python 3.9 uses genuine Tomli 2.4.1 from the local runtime's pip vendor directory through test-only PYTHONPATH. No vendored dependencies are packaged.
+- In-memory compilation, CLI help/version, safe missing-config failure, and Bash syntax checks pass. No bytecode/cache is generated in the project.
+- All 30 operational settings exist in the categorized template with comments; all 35 CLI spellings and every application/test function are documented. Original legal/vibe-coding text is unchanged in LEGAL.md and preserved verbatim in README.
+- Uppercase, lowercase and mixed-case category names resolve identically. Duplicate category spellings and incorrectly cased option keys fail validation. Missing private config.toml never falls back to either template. A configured no-flags dry-run from another working directory creates script-local logs without backup or notification side effects.
+- Existing tests cover error-only .err output, deadlines for silent/partial/closed-pipe children, selection safeguards, preflight requirements, real-backup return codes, mocked MQTT handling, and all four dry-run notification combinations. Both preview channels remain independently opt-in and cannot launch a backup.
+- In an isolated temporary Git repository, 26 allowed/ignored path cases pass, including config names at multiple depths, case variants, non-TOML formats, backup copies, legacy templates, logs and caches. Actual staging with `git add .` includes only .gitignore and the root config.example.toml among the populated sample files; private configs and old examples remain ignored. No user's repository was staged or changed.
+- The version in the app, VERSION, change record and archive agrees on 0.0.4; next is 0.0.5. Rollover remains 0.0.99 → 0.1.0.
 
-- All four dry-run notification combinations are tested with the actual preview execution path and mocked mail/MQTT boundaries. None may launch a backup. Real runs ignore preview options and do not send an extra test email.
-- Preview MQTT topic suffix, forced non-retention, explicit dry-run status, null backup rc, additional preview markers, existing connection options, and exclusion of credentials from payload are checked.
-- Email tests inspect MIME/header/body construction and bounded stdin submission to sendmail. Missing mail service, nonzero submission result, timeout, invalid recipients, and CR/LF/NUL/header injection are covered without sending mail.
-- Independent notification failure handling attempts both requested channels, logs failures in .err, and returns 3 for dry-run. Default silence, normal backup return-code behavior, and preflight gates remain covered.
+## Archive verification and provenance
 
-## Archive checks
+The final ZIP contains 16 files: all 14 previous-release paths plus .gitignore and config.example.toml. It retains both original paths, README.md and pbs-backup. The prior 0.0.3 ZIP SHA-256 was recomputed and its contents matched the preserved source byte-for-byte. Both preserved original extracted files were rehashed and matched ORIGINAL_MANIFEST.json. The original Downloads ZIP is no longer available, so its historical recorded archive hash could not be independently recomputed this release; original-content verification uses the preserved extracted files and their recorded hashes.
 
-The ZIP is reopened, CRC-checked, compared byte-for-byte to the complete release directory, and checked against both the original source archive and 0.0.2. Both original files and all 14 prior-release file paths remain. This release contains 14 files, with no added or removed paths relative to 0.0.2. Existing application/config/documentation/test/manifest files are updated as required. `LEGAL.md` and `requirements.txt` remain unchanged.
+The ZIP is CRC-checked, checked against original/prior manifests, safely extracted, and compared byte-for-byte with the release directory. All internal SHA-256 entries are checked; the executable script mode is preserved. Compilation, CLI/config/documentation/Git checks and the offline regression suite are repeated against the extracted deliverable. LEGAL.md and requirements.txt are unchanged. No private config.toml, credentials, runtime logs, bytecode, caches, virtual environments, OS metadata, build output or temporary files are packaged.
 
-The archive is safely extracted and rechecked with compilation, help/version, TOML loading, and the regression suite. The script's executable mode is recorded in the ZIP. No runtime logs, configured credentials, bytecode, caches, temporary files, OS metadata, virtual environments, or build output are packaged.
+ORIGINAL_MANIFEST.json records original provenance. PREVIOUS_RELEASE_MANIFEST.json records each previous file's digest/change status and the prior archive digest. RELEASE_MANIFEST.sha256 covers every packaged file except itself, avoiding a circular hash. The separate ZIP .sha256 covers the entire archive. These are integrity checks, not signatures. Git ignore rules govern untracked files; they do not erase history, untrack existing files or prevent a forced add.
 
-`ORIGINAL_MANIFEST.json` records original paths and SHA-256 values. `PREVIOUS_RELEASE_MANIFEST.json` records the 0.0.2 ZIP hash and each prior file's hash/change status. `RELEASE_MANIFEST.sha256` hashes every packaged file except itself to avoid circular hashing. The ZIP's separate `.sha256` file covers the whole archive. Checksums are integrity checks, not signatures.
+## Not tested live
 
-## What was not tested live
+No Proxmox VE/PBS host, MQTT broker or real mail service was contacted. Actual backup/restore, host storage/retention, guest disruption, live MQTT/TLS/authentication/QoS/retained behavior and email relay/inbox delivery need target-host testing. External notification boundaries are mocked; harmless local Python children exercise stream/deadline handling.
 
-No Proxmox VE/PBS host, MQTT broker, or real mail service was contacted. No real notification was sent. Actual backups/restores, PBS/storage permissions, host retention settings, guest disruption/migration, PVE email delivery, local sendmail relay/queue/inbox delivery, live Paho/TLS/authentication/QoS/retained status, and cross-version Proxmox integration still need testing on the target host.
-
-The error filter uses known severity prefixes, not arbitrary language inference. Unlabelled child diagnostics/continuation lines stay in `.log`; a nonzero child exit also creates a failure summary in `.err`. Future Proxmox output-format changes may require extending the recognized prefixes.
-
-Timeout cleanup still targets only the direct subprocess, not all Proxmox workers. MQTT connection setup is not bounded by the publish timeout, and MQTT failure deliberately preserves the backup exit code. Disk exhaustion, blocked kernel I/O, full process-tree interruption, and restore integrity were not validated.
-
-A successful sendmail invocation confirms local submission only; it does not prove inbox delivery or test the full PVE notification system. A timed-out submission may have partially progressed; no automatic retry is performed. MQTT preview tests are mocked and do not validate live broker permissions for the `/dry-run` topic.
-
-Config errors happen before log initialization and therefore print to terminal stderr. Logging initialization failures stop execution. Runtime failures can prevent final MQTT delivery. The app does not manage schedules, log rotation, guest locks, or restore validation.
+Known behavior is preserved: error classification uses explicit severity prefixes; unlabelled child diagnostics remain in the full log. Backup timeout kills/reaps only the direct child, so PVE workers can continue. MQTT publish timeout does not bound DNS/connection setup. Real-backup MQTT failure preserves the child exit code. Sendmail success means local acceptance, not inbox delivery. Config errors precede log initialization. Disk exhaustion, blocked kernel I/O and full process-tree interruption were not validated.

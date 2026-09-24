@@ -4,7 +4,16 @@ This is the canonical versioning.md document, named `VERSIONING.md`. Keep histor
 
 ## Release rules
 
-Every created release advances exactly one patch step. Starting with `major.minor.patch`, increment patch by one while it is below 99. At 99, increment minor and reset patch to zero: **0.0.99 → 0.1.0**, never 0.0.100. The current release is 0.0.3; the next release is 0.0.4. Keep `VERSION`, `pbs-backup.__version__`, this record, verification, and ZIP name consistent. Update CLI/config examples and the code map for every changed option/function. Do not create intermediate numbered releases for working edits.
+Every created release advances exactly one patch step. Starting with `major.minor.patch`, increment patch by one while it is below 99. At 99, increment minor and reset patch to zero: **0.0.99 → 0.1.0**, never 0.0.100. The current release is 0.0.4; the next release is 0.0.5. Keep `VERSION`, `pbs-backup.__version__`, this record, verification, and ZIP name consistent. Update CLI/config examples and the code map for every changed option/function. Do not create intermediate numbered releases for working edits.
+
+## 0.0.4 — 2026-09-24
+
+- Add `config.example.toml` with all 30 settings and comments grouped into `[SELECTION]`, `[BACKUP]`, `[MAIL]`, `[LOGGING]`, and `[MQTT]`. Make private `config.toml` beside the real script the default; missing configuration fails with copy/edit guidance instead of using the example or a fallback. Existing files remain usable via `--config`.
+- Reuse `load_config` to accept category names case-insensitively while keeping keys strict. Reject categories repeated with different casing to avoid ambiguous configuration merges. Existing lowercase categories remain accepted.
+- Add `.gitignore` for case-insensitive `config*.*` names at any depth and all TOML files, with only root `config.example.toml` excepted. Ignore logs, bytecode, build caches, virtual environments and temporary files. Keep placeholder `pbs-backup.toml` and `config.example.sh` in the full ZIP; both are Git-ignored. Never package private `config.toml`.
+- Document safe template copying, private config loading, every category/option, Git behavior for already tracked files, and all related commands. Update function/command maps and preserve the original vibe-coding disclaimer verbatim.
+- Extend regression checks for category casing/equivalence, ambiguous duplicates, strict key casing, default-file selection and missing-file safety. Verify Git ignore rules in an isolated temporary repository. Update provenance, version and release checksums. Preserve all original and prior-release file paths.
+- Keep log placement, error-only `.err`, independent opt-in dry-run MQTT/email, original backup defaults, preflight gates, TLS and timeout behavior unchanged. No new dependency. See `VERIFICATION.md` for results and live-testing limits.
 
 ## 0.0.3 — 2026-09-24
 

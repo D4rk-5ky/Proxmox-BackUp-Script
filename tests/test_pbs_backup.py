@@ -293,9 +293,44 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(args.mqtt_host, 'broker.invalid')
         self.assertTrue(args.dry_run)
 
+    def test_config_category_casing(self):
+        """Resolve every category identically in uppercase, lowercase, or mixed case."""
+        template = (SCRIPT.parent / 'config.example.toml').read_text()
+        template = template.replace('storage = ""', 'storage = "pbs"').replace('host = ""', 'host = "broker.invalid"').replace('topic = ""', 'topic = "test"')
+        expected = vars(self.config_args(template))
+        for transform in (str.lower, str.title):
+            text = template
+            for section in G['CONFIG_SECTIONS']:
+                text = text.replace('[' + section.upper() + ']', '[' + transform(section) + ']')
+            self.assertEqual(vars(self.config_args(text)), expected)
+
+    def test_config_duplicate_categories_rejected(self):
+        """Never merge different spellings of the same category, even disjoint keys."""
+        for extra in ('[MQTT]\nport=1883\n', '[BaCkUp]\ndry_run=true\n'):
+            output = io.StringIO()
+            with contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as caught:
+                self.config_args(self.valid_config() + extra)
+            self.assertEqual(caught.exception.code, 2)
+            self.assertIn('Duplicate TOML category', output.getvalue())
+
+    def test_config_key_casing_stays_strict(self):
+        """Uppercase categories do not silently accept misspelled option keys."""
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            self.config_args(self.valid_config().replace('storage=', 'Storage='))
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_default_config_missing_never_loads_templates(self):
+        """Missing private config fails even when configured templates are present."""
+        appdir = Path(self.tmp.name)
+        for name in ('config.example.toml', 'pbs-backup.toml'):
+            (appdir / name).write_text(self.valid_config())
+        with patch.dict(G, SCRIPT_DIR=appdir), patch.object(sys, 'argv', ['pbs-backup']), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            APP['parse_args']()
+        self.assertEqual(caught.exception.code, 2)
+
     def test_config_all_options(self):
         """Load all shipped keys and correctly convert unset strings, arrays and timeout."""
-        text = (SCRIPT.parent / 'pbs-backup.toml').read_text()
+        text = (SCRIPT.parent / 'config.example.toml').read_text()
         text = text.replace('storage = ""', 'storage = "pbs"').replace('host = ""', 'host = "broker.invalid"').replace('topic = ""', 'topic = "test"')
         args = self.config_args(text)
         self.assertTrue(args.dry_run)
@@ -360,7 +395,7 @@ class BackupTests(unittest.TestCase):
         """Run a configured preview from another cwd without backup/MQTT side effects."""
         appdir = Path(self.tmp.name) / 'app'
         appdir.mkdir()
-        (appdir / 'pbs-backup.toml').write_text(self.valid_config().replace('[mqtt]', 'dry_run=true\n[mqtt]'))
+        (appdir / 'config.toml').write_text(self.valid_config().replace('[mqtt]', 'dry_run=true\n[mqtt]'))
         old_cwd = Path.cwd()
         try:
             G['os'].chdir(self.tmp.name)

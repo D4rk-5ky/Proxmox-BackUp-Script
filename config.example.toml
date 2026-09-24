@@ -1,5 +1,3 @@
-# Preserved compatibility template; not automatically loaded.
-# Use config.example.toml for setup or select this file explicitly with --config.
 # Proxmox → PBS backup with MQTT status — complete configuration
 # Template: copy to config.toml beside the real pbs-backup script before editing.
 # config.toml loads automatically; config.example.toml is the only Git-allowed config.

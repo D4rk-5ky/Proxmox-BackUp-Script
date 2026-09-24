@@ -2,7 +2,7 @@
   "source_archive": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next.zip",
   "source_archive_sha256": "922078bf8b048324faec640faf5ef71c9d142bd19694c1dd8921b2304722b997",
   "source_archive_comment": "c34cea5811adba2f9f5cfac4d80eb4632439a277",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "original_files": [
     {
       "archive_path": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next/README.md",
@@ -23,6 +23,7 @@
   ],
   "removed_original_files": [],
   "added_release_files": [
+    ".gitignore",
     "LEGAL.md",
     "ORIGINAL_MANIFEST.json",
     "PREVIOUS_RELEASE_MANIFEST.json",
@@ -32,8 +33,10 @@
     "VERSIONING.md",
     "commented_code_map.md",
     "config.example.sh",
+    "config.example.toml",
     "pbs-backup.toml",
     "requirements.txt",
     "tests/test_pbs_backup.py"
-  ]
+  ],
+  "verification_basis": "Preserved original extracted files rehashed against recorded digests; original Downloads ZIP unavailable for a new whole-archive hash."
 }

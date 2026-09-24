@@ -3,7 +3,7 @@
 Proxmox full backup (VMs + CTs) to PBS via vzdump, then publish MQTT status (success OR error).
 
 - Streams output live to terminal
-- Loads settings from pbs-backup.toml beside the script
+- Loads settings from config.toml beside the script
 - Writes full output to .log and error messages only to .err in script-local logs/
 - Attempts MQTT JSON status after actual runs, on success and failure
 - Optional, explicitly labelled MQTT/email previews during dry-run
@@ -32,7 +32,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from typing import Any, Dict, List, Optional, Tuple
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 try:
@@ -369,7 +369,7 @@ def publish_backup_status(
 def dry_run_recipients(value: Optional[str]) -> List[str]:
     """Validate comma-separated bare addresses/local aliases without header injection."""
     if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ValueError("Dry-run email requires mail.mailto with comma-separated addresses or local aliases.")
+        raise ValueError("Dry-run email requires MAIL.mailto with comma-separated addresses or local aliases.")
     recipients = [item.strip() for item in value.split(",")]
     for recipient in recipients:
         if not recipient or not recipient.isascii() or recipient.startswith("-"):
@@ -506,13 +506,19 @@ def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
         with path.open("rb") as source:
             data = tomllib.load(source)
     except OSError:
-        parser.error(f"Cannot read TOML config: {path}. Provide pbs-backup.toml or use --config PATH.")
+        parser.error(f"Cannot read TOML config: {path}. Copy config.example.toml to config.toml, edit it, or use --config PATH.")
     except ValueError:
         # Do not echo parser excerpts that could contain a password.
         parser.error(f"Invalid TOML syntax in {path}; check quoting, tables, and duplicate keys.")
     actions = {action.dest: action for action in parser._actions}
     defaults: Dict[str, Any] = {}
-    for section, values in data.items():
+    seen_sections = set()
+    for raw_section, values in data.items():
+        # Category spelling is flexible; keys remain strict to catch setting typos.
+        section = raw_section.lower()
+        if section in seen_sections:
+            parser.error(f"Duplicate TOML category (case-insensitive): {raw_section}.")
+        seen_sections.add(section)
         if section not in CONFIG_SECTIONS or not isinstance(values, dict):
             parser.error(f"Unknown or invalid TOML section: {section}.")
         keys = {dest.removeprefix("mqtt_") if section == "mqtt" else dest: dest
@@ -551,10 +557,10 @@ def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Load settings from pbs-backup.toml beside this script. Optional flags override TOML. Dry-run notifications require explicit opt-in.",
+        description="Load settings from config.toml beside this script. Optional flags override TOML. Dry-run notifications require explicit opt-in.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--config", default=str(SCRIPT_DIR / "pbs-backup.toml"), help="TOML settings file; relative paths use the working directory.")
+    p.add_argument("--config", default=str(SCRIPT_DIR / "config.toml"), help="TOML settings file; relative paths use the working directory.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sel = p.add_argument_group("Selection")
@@ -619,11 +625,11 @@ def parse_args() -> argparse.Namespace:
     if args.bwlimit < 0:
         p.error("--bwlimit must be zero or positive.")
     if args.timeout is not None and args.timeout <= 0:
-        p.error("--timeout must be positive; use backup.timeout = 0 in TOML for no deadline.")
+        p.error("--timeout must be positive; use BACKUP.timeout = 0 in TOML for no deadline.")
     if args.mqtt_timeout <= 0 or not 1 <= args.mqtt_port <= 65535:
         p.error("--mqtt-timeout must be positive and --mqtt-port must be 1..65535.")
     if any(not value or not value.strip() for value in (args.storage, args.mqtt_host, args.mqtt_topic)):
-        p.error("Set backup.storage, mqtt.host and mqtt.topic in TOML (or supply their CLI overrides).")
+        p.error("Set BACKUP.storage, MQTT.host and MQTT.topic in TOML (or supply their CLI overrides).")
     if any(char in args.mqtt_topic for char in ("+", "#", "\x00")):
         p.error("--mqtt-topic must be a publish topic without wildcards or NUL.")
     if (args.mqtt_cafile or args.mqtt_insecure) and not args.mqtt_tls:
@@ -638,7 +644,7 @@ def parse_args() -> argparse.Namespace:
         except ValueError as e:
             p.error(str(e))
     if not args.log_dir.strip():
-        p.error("logging.log_dir / --log-dir must not be empty.")
+        p.error("LOGGING.log_dir / --log-dir must not be empty.")
     directory = Path(args.log_dir).expanduser()
     args.log_dir = str(directory if directory.is_absolute() else SCRIPT_DIR / directory)
     return args

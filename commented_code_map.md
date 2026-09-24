@@ -6,7 +6,10 @@ This map explains the current application, every function, and the commands used
 
 - `pbs-backup`: the executable Python app; existing helpers remain in the original single module.
 - `README.md`: installation, complete flag reference, examples, results, and operational limits.
-- `pbs-backup.toml`: automatic, fully commented configuration for all 30 runtime settings.
+- `config.example.toml`: fully commented, categorized template for all 30 settings; the only Git-allowed config example.
+- `config.toml`: private user-created settings loaded automatically; ignored by Git and absent from the ZIP.
+- `pbs-backup.toml`: preserved placeholder template, usable through an explicit `--config` path and ignored by Git.
+- `.gitignore`: ignores config-prefixed files and TOML at any depth, except the root template, plus runtime logs/caches/temporary files.
 - `config.example.sh`: optional Bash argument overrides; sourcing runs no backup, and TOML still loads.
 - `requirements.txt`: Paho dependency plus conditional Tomli on Python older than 3.11.
 - `VERSION` and `VERSIONING.md`: current version and cumulative change record/rollover policy.
@@ -39,7 +42,7 @@ The optional Paho import preserves the original behavior of setting `mqtt = None
 | `main()` | Loads config/options, initializes logs, checks prerequisites/selection, builds/runs or previews the command, then attempts appropriate notifications. | Never executes a dry-run backup. Both preview channels are opt-in and independently attempted; failures enter .err and return 3 for dry-run. Real-run email remains with vzdump, and MQTT failure preserves its backup exit code. |
 | `is_error_line(line)` | Tests explicit ERROR/TASK ERROR/FATAL/CRITICAL prefixes, optionally following numeric guest IDs and timestamps. | Prevents ordinary stderr, INFO/WARN, or incidental error words from being misclassified. Unlabelled diagnostics stay in the full log. |
 | `run_command_stream.filter_errors(output, final)` | Buffers partial lines between decoded chunks, writes only recognized errors, and flushes a final fragment. | Error prefixes split across reads are recognized; successful/progress messages never get copied wholesale to `.err`. |
-| `load_config(path, parser)` | Reads TOML through tomllib/Tomli; checks known tables/keys and exact types using the parser actions. Converts optional empty strings and timeout 0, and anchors TOML CA paths to the config directory. | Rejects typos/invalid settings instead of silently dropping them. Syntax errors omit source excerpts to avoid exposing password values. Returns defaults for the existing parser rather than duplicating backup/MQTT execution code. |
+| `load_config(path, parser)` | Reads TOML through tomllib/Tomli; normalizes category names to lowercase, rejects duplicate normalized categories, and checks known keys and exact types using the parser actions. Keys remain case-sensitive. Converts optional empty strings and timeout 0, and anchors TOML CA paths to the config directory. | Rejects typos/invalid settings instead of silently dropping them. Syntax errors omit source excerpts to avoid exposing password values. Returns defaults for the existing parser rather than duplicating backup/MQTT execution code. |
 | `dry_run_recipients(value)` | Parses comma-separated bare ASCII email addresses or simple local aliases and rejects missing recipients, malformed addresses, leading command options, and control/header injection. | Reused by dry-run configuration validation and email submission. Does not change real-backup recipient handling or resolve PVE user IDs. |
 | `send_dry_run_email(...)` | Builds EmailMessage headers/body explicitly stating DRY-RUN and NO BACKUP EXECUTED; submits through local sendmail with a 30-second timeout. | Gives previews a mail path without invoking vzdump. Includes only planned command/host/storage/log paths; successful submission means local mail-service acceptance, not inbox delivery. |
 
@@ -51,7 +54,7 @@ No external command is executed through a shell. `shlex.quote` creates readable 
 
 | Command / wrapper flags | What executes and why |
 | --- | --- |
-| `pbs-backup` with no flags | Loads adjacent `pbs-backup.toml`, creates the configured script-relative logs directory, and follows its dry-run/backup setting. |
+| `pbs-backup` with no flags | Loads adjacent `config.toml`, creates the configured script-relative logs directory, and follows its dry-run/backup setting. |
 | `--config PATH` | Selects another TOML file; a relative path uses the working directory. It does not move the default logs directory. |
 | `pbs-backup -h` / `--help` | Argparse displays command usage and exits. |
 | `pbs-backup --version` | Argparse prints the current version and exits. |
@@ -90,7 +93,11 @@ The script does not expose `vzdump` passthrough arguments, restore commands, or 
 | `python3 -B -m unittest discover -s tests -v` | Discovers and runs the offline test suite, prints each result, and suppresses bytecode caches. |
 | `bash -n config.example.sh` | Parses the Bash example without executing it. |
 | `sha256sum -c RELEASE_MANIFEST.sha256` | On Linux, checks each listed packaged file against its SHA-256 digest. The manifest excludes itself to avoid a circular checksum. |
-| `chmod 600 pbs-backup.toml` | Restricts config access to its owner before storing plaintext credentials. |
+| `cp -n config.example.toml config.toml` | Creates private settings without overwriting existing values. |
+| `git rm --cached -- config.toml` | Stops tracking an already tracked config while retaining the local file; does not erase Git history. |
+| `git check-ignore -v --no-index config.toml` | Shows the ignore rule even for a tracked path. |
+| `git status --short --untracked-files=all` | Shows changed and untracked files without staging or committing. |
+| `chmod 600 config.toml` | Restricts config access to its owner before storing plaintext credentials. |
 | `python -m pip install -r requirements.txt` | Installs Paho and conditional Tomli in a selected virtual environment; does not change app settings. |
 | `sudo /path/to/venv/bin/python ./pbs-backup` | Runs the same TOML-driven app with the selected environment and root privileges. |
 
@@ -100,36 +107,36 @@ Every key below maps to the existing execution path in the command-routing table
 
 | TOML key | Parser destination / operational route |
 | --- | --- |
-| `selection.all` | `all` / `--all` |
-| `selection.vmid` | `vmid` / `--vmid` |
-| `selection.exclude` | `exclude` / `--exclude` |
-| `backup.storage` | `storage` / `--storage` |
-| `backup.mode` | `mode` / `--mode` |
-| `backup.compress` | `compress` / `--compress` |
-| `backup.bwlimit` | `bwlimit` / `--bwlimit` |
-| `backup.only_running` | `only_running` / `--only-running` |
-| `backup.quiet` | `quiet` / `--quiet` |
-| `backup.timeout` | `timeout` / `--timeout` |
-| `backup.notes_template` | `notes_template` / `--notes-template` |
-| `backup.dry_run` | `dry_run` / `--dry-run` |
-| `backup.dry_run_mqtt` | `dry_run_mqtt` / `--dry-run-mqtt` |
-| `backup.dry_run_email` | `dry_run_email` / `--dry-run-email` |
-| `mail.mailto` | `mailto` / `--mailto` |
-| `mail.mailnotification` | `mailnotification` / `--mailnotification` |
-| `logging.log_dir` | `log_dir` / `--log-dir` |
-| `logging.log_prefix` | `log_prefix` / `--log-prefix` |
-| `mqtt.host` | `mqtt_host` / `--mqtt-host` |
-| `mqtt.port` | `mqtt_port` / `--mqtt-port` |
-| `mqtt.topic` | `mqtt_topic` / `--mqtt-topic` |
-| `mqtt.user` | `mqtt_user` / `--mqtt-user` |
-| `mqtt.pass` | `mqtt_pass` / `--mqtt-pass` |
-| `mqtt.qos` | `mqtt_qos` / `--mqtt-qos` |
-| `mqtt.retain` | `mqtt_retain` / `--mqtt-retain` |
-| `mqtt.timeout` | `mqtt_timeout` / `--mqtt-timeout` |
-| `mqtt.client_id` | `mqtt_client_id` / `--mqtt-client-id` |
-| `mqtt.tls` | `mqtt_tls` / `--mqtt-tls` |
-| `mqtt.cafile` | `mqtt_cafile` / `--mqtt-cafile` |
-| `mqtt.insecure` | `mqtt_insecure` / `--mqtt-insecure` |
+| `SELECTION.all` | `all` / `--all` |
+| `SELECTION.vmid` | `vmid` / `--vmid` |
+| `SELECTION.exclude` | `exclude` / `--exclude` |
+| `BACKUP.storage` | `storage` / `--storage` |
+| `BACKUP.mode` | `mode` / `--mode` |
+| `BACKUP.compress` | `compress` / `--compress` |
+| `BACKUP.bwlimit` | `bwlimit` / `--bwlimit` |
+| `BACKUP.only_running` | `only_running` / `--only-running` |
+| `BACKUP.quiet` | `quiet` / `--quiet` |
+| `BACKUP.timeout` | `timeout` / `--timeout` |
+| `BACKUP.notes_template` | `notes_template` / `--notes-template` |
+| `BACKUP.dry_run` | `dry_run` / `--dry-run` |
+| `BACKUP.dry_run_mqtt` | `dry_run_mqtt` / `--dry-run-mqtt` |
+| `BACKUP.dry_run_email` | `dry_run_email` / `--dry-run-email` |
+| `MAIL.mailto` | `mailto` / `--mailto` |
+| `MAIL.mailnotification` | `mailnotification` / `--mailnotification` |
+| `LOGGING.log_dir` | `log_dir` / `--log-dir` |
+| `LOGGING.log_prefix` | `log_prefix` / `--log-prefix` |
+| `MQTT.host` | `mqtt_host` / `--mqtt-host` |
+| `MQTT.port` | `mqtt_port` / `--mqtt-port` |
+| `MQTT.topic` | `mqtt_topic` / `--mqtt-topic` |
+| `MQTT.user` | `mqtt_user` / `--mqtt-user` |
+| `MQTT.pass` | `mqtt_pass` / `--mqtt-pass` |
+| `MQTT.qos` | `mqtt_qos` / `--mqtt-qos` |
+| `MQTT.retain` | `mqtt_retain` / `--mqtt-retain` |
+| `MQTT.timeout` | `mqtt_timeout` / `--mqtt-timeout` |
+| `MQTT.client_id` | `mqtt_client_id` / `--mqtt-client-id` |
+| `MQTT.tls` | `mqtt_tls` / `--mqtt-tls` |
+| `MQTT.cafile` | `mqtt_cafile` / `--mqtt-cafile` |
+| `MQTT.insecure` | `mqtt_insecure` / `--mqtt-insecure` |
 
 ## Every test function
 
@@ -166,6 +173,10 @@ The test module loads the real app with `runpy` without invoking its `__main__` 
 | `BackupTests.config_args()` | Parse TOML without required CLI settings to exercise config-first usage. |
 | `BackupTests.valid_config()` | Provide minimal configured destinations, leaving other settings at defaults. |
 | `BackupTests.test_config_only_and_precedence()` | Use TOML alone and let an explicit CLI value override it without losing others. |
+| `BackupTests.test_config_category_casing()` | All categories resolve identically across case variants. |
+| `BackupTests.test_config_duplicate_categories_rejected()` | Duplicate category spellings fail even for disjoint keys. |
+| `BackupTests.test_config_key_casing_stays_strict()` | Option keys remain case-sensitive. |
+| `BackupTests.test_default_config_missing_never_loads_templates()` | Missing private config never falls back to a template. |
 | `BackupTests.test_config_all_options()` | Load all shipped keys and correctly convert unset strings, arrays and timeout. |
 | `BackupTests.test_config_invalid_types_keys_and_choices()` | Reject TOML typos, invalid choices and bool/integer confusion before running. |
 | `BackupTests.test_config_syntax_and_secret_not_echoed()` | Syntax errors and invalid password types must not dump secret-bearing values. |

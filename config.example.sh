@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Source from Bash after reviewing/editing values; this file executes no backup.
-# Normal runs use pbs-backup.toml automatically; this optional array shows CLI overrides.
+# Normal runs use config.toml automatically; this optional array shows CLI overrides.
 # --config /path/to/settings.toml selects an alternative file. See README.md for precedence.
 # Usage: source ./config.example.sh
 #        sudo ./pbs-backup "${PBS_BACKUP_ARGS[@]}"
