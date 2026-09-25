@@ -4,7 +4,25 @@ This is the canonical versioning.md document, named `VERSIONING.md`. Keep histor
 
 ## Release rules
 
-Every created release advances exactly one patch step. Starting with `major.minor.patch`, increment patch by one while it is below 99. At 99, increment minor and reset patch to zero: **0.0.99 → 0.1.0**, never 0.0.100. The current release is 0.0.4; the next release is 0.0.5. Keep `VERSION`, `pbs-backup.__version__`, this record, verification, and ZIP name consistent. Update CLI/config examples and the code map for every changed option/function. Do not create intermediate numbered releases for working edits.
+Every created release advances exactly one patch step. Starting with `major.minor.patch`, increment patch by one while it is below 99. At 99, increment minor and reset patch to zero: **0.0.99 → 0.1.0**, never 0.0.100. The current release is 0.0.5; the next release is 0.0.6. Keep `VERSION`, `pbs_backup.__version__`, this record, verification, and ZIP name consistent. Update CLI/config examples and the code map for every changed option/function. Do not create intermediate numbered releases for working edits.
+
+## 0.0.5 — 2026-09-25
+
+### Module refactor
+
+- Convert the original `pbs-backup` path to a thin executable launcher for the adjacent `pbs_backup` package. Add the standard `__init__.py` marker and centralize Python version metadata there. Deploy the launcher and package together; no application installer or new dependency is needed.
+- Move `is_root` and `main` into `app.py`, keeping startup ordering, preflight gates, backup/preview orchestration and exit-code decisions together. Qualify notification calls and the Paho availability check through `notifications` so they use the module's shared state.
+- Move `load_config`, `parse_args`, the TOML fallback import and `CONFIG_SECTIONS` into `cli.py`. Resolve `SCRIPT_DIR` to the package's parent so private config and relative logs stay beside the launcher, including from another working directory or a symlink.
+- Move `resolve_selection`, `build_vzdump_cmd` and `run_command_stream` (including its nested `filter_errors`) into `backup.py`. Retain exact guest-selection, argv, streaming, error filtering, timeout and cleanup behavior.
+- Move `mqtt_publish`, its callbacks, `publish_backup_status`, `dry_run_recipients`, `send_dry_run_email` and optional Paho import into `notifications.py`. Keep MQTT and email together because their approximately 180 lines of functions are a manageable shared responsibility. Preserve independent opt-ins, preview routing/retention/payload, local sendmail validation/submission and failure handling.
+- Move `now_iso`, `ensure_dir`, `nonempty_file`, `build_log_paths`, `setup_logger`, `is_error_line` and `ERROR_LINE` into `logging_utils.py`. Reuse them from the other modules rather than introducing duplicated helpers or a general utility grab bag.
+- Preserve all 17 top-level functions and three nested functions. Sixteen top-level function bodies are unchanged; main changes only notification name qualification. All 30 settings, optional flags, defaults, configuration examples, Git ignore rules and dependencies remain unchanged. No sync, verify, prune or garbage-collection functionality exists here, so no speculative modules are added.
+
+### Documentation and verification
+
+- Explain full-directory installation/update requirements and missing-package troubleshooting in README, keeping current usage and the original disclaimer. Add module sizes, ownership, dependency direction and grouping rationale to commented_code_map.md, with every function and command covered.
+- Adapt all 46 existing regression tests to module imports and correctly scoped mocks; add real launcher/symlink and fresh package-import tests. Verify on Python 3.9 and 3.12, compare function ASTs, check Git inclusion of every new Python module, and validate the clean final archive against original and previous manifests.
+- Retain all 16 prior-release file paths and both original paths. Add six package files for 22 total files. Update verification/provenance/checksums and version to 0.0.5. Live Proxmox/PBS and notification delivery remain untested; see VERIFICATION.md.
 
 ## 0.0.4 — 2026-09-24
 

@@ -8,6 +8,8 @@ Copy **`config.example.toml`** to **`config.toml`**, edit your settings, then ru
 
 Run on a **Proxmox VE host**, not on PBS. Requirements are Python 3.9+, root, `vzdump`, and `paho-mqtt`. Running-guest filtering additionally needs `pvesh`. Configure your PBS datastore as a storage target in PVE before using the app.
 
+Extract the **entire project** into one directory. Keep the executable `pbs-backup` beside the complete `pbs_backup/` package directory. Run the launcher, not individual `.py` modules. When updating, replace the launcher and package together and preserve your private `config.toml`; copying only the launcher is insufficient. No package installation is needed for the application itself.
+
 For the host's system Python:
 
 ```bash
@@ -64,7 +66,7 @@ After reviewing the preview, change **`dry_run = false`** in `[BACKUP]` and run 
 - Strings need quotes; booleans are unquoted `true`/`false`; guest lists use arrays such as `[100, 101]`. Empty optional strings mean unset. TOML has no null: `BACKUP.timeout = 0` disables that deadline.
 - TOML values are not shell commands, and environment variables such as `$PASSWORD` are not expanded. Passwords stored in TOML stay off the process command line, but the file is plaintext. Use `chmod 600 config.toml` to restrict access before saving secrets.
 
-There is no automatically installed scheduler, config-writing command, restore operation, or log rotation. Preserve your configured TOML file when replacing the application during an update.
+There is no automatically installed scheduler, config-writing command, restore operation, sync, verification-job, prune, garbage-collection command, or log rotation. Preserve your configured TOML file when replacing the application during an update.
 
 ## Keeping settings out of Git
 
@@ -243,6 +245,7 @@ A real backup attempts one normal status publication. Opted-in dry-run publicati
 | Exit `3` during dry-run | At least one requested notification failed; inspect `.err` and broker/local mail-service settings. A real backup child may independently return 3. |
 | Exit `255` | Caught command-launch/streaming error or timeout; inspect `.err`, full `.log`, and PVE task state. |
 | Other child code | Passed through from `vzdump`. Negative signal return values are mapped by the OS when used as process exit status. |
+| `ModuleNotFoundError: No module named pbs_backup` | Restore the complete `pbs_backup/` directory beside the real launcher; extract and deploy the entire project. |
 | `MQTT publish failed` | Check broker/TLS/auth settings. The backup exit code is preserved; MQTT failure does not turn a successful backup into a failed backup. |
 | No matching running guests | No backup or MQTT status is sent; check IDs, node name, inventory, and guest states. |
 | Missing TOML reader | Use Python 3.11+ or install `tomli` into the interpreter running this script. |

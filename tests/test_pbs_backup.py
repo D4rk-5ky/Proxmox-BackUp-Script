@@ -6,7 +6,8 @@ import io
 import json
 import logging
 from pathlib import Path
-import runpy
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,8 +16,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'pbs-backup'
-APP = runpy.run_path(str(SCRIPT))
-G = APP['main'].__globals__
+sys.path.insert(0, str(SCRIPT.parent))
+from pbs_backup import app, backup, cli, logging_utils, notifications
 BASE = ['--storage', 'pbs-storage', '--mqtt-host', 'broker.invalid', '--mqtt-topic', 'test/backup']
 
 
@@ -44,25 +45,59 @@ class BackupTests(unittest.TestCase):
     def args(self, *extra):
         """Parse realistic command lines using the application's existing parser."""
         with patch.object(sys, 'argv', ['pbs-backup', '--config', str(self.config), *BASE, *extra]):
-            return APP['parse_args']()
+            return cli.parse_args()
 
     def run_child(self, code, timeout=None):
         """Run a harmless Python child through the real streaming/deadline code."""
         with contextlib.redirect_stdout(io.StringIO()):
-            self.logger = APP['setup_logger'](self.logfile, self.errfile)
-            return APP['run_command_stream'](
+            self.logger = logging_utils.setup_logger(self.logfile, self.errfile)
+            return backup.run_command_stream(
                 [sys.executable, '-c', code], self.logger,
                 self.logfile, self.errfile, timeout=timeout)
 
     def call_main(self, extra=(), root=True, executable='/mock/vzdump', mqtt=object(), rc=0, publish_error=None):
         """Mock external boundaries while retaining parsing and main orchestration."""
         with patch.object(sys, 'argv', ['pbs-backup', '--config', str(self.config), *BASE, '--log-dir', self.tmp.name, *extra]), \
-             patch.dict(G, is_root=lambda: root, mqtt=mqtt), \
-             patch.object(G['shutil'], 'which', return_value=executable), \
-             patch.dict(G, run_command_stream=MagicMock(return_value=rc), publish_backup_status=MagicMock(side_effect=publish_error)), \
+             patch.multiple(app, is_root=lambda: root), \
+             patch.multiple(notifications, mqtt=mqtt), \
+             patch.object(shutil, 'which', return_value=executable), \
+             patch.multiple(app, run_command_stream=MagicMock(return_value=rc)), \
+             patch.multiple(notifications, publish_backup_status=MagicMock(side_effect=publish_error)), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            result = APP['main']()
-            return result, G['run_command_stream'], G['publish_backup_status']
+            result = app.main()
+            return result, app.run_command_stream, notifications.publish_backup_status
+
+    def test_launcher_from_other_directory_and_symlink(self):
+        """The real launcher finds its package/config from another cwd or a symlink."""
+        link = Path(self.tmp.name) / 'backup-link'
+        link.symlink_to(SCRIPT)
+        for command in (SCRIPT, link):
+            for flag in ('--help', '--version'):
+                with self.subTest(command=command, flag=flag):
+                    result = subprocess.run([sys.executable, '-B', str(command), flag],
+                                            cwd=self.tmp.name, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('0.0.5' if flag == '--version' else '--config', result.stdout)
+            result = subprocess.run([sys.executable, '-B', str(command)], cwd=self.tmp.name,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(str(SCRIPT.parent / 'config.toml'), result.stderr)
+            self.assertFalse((Path(self.tmp.name) / 'logs').exists())
+
+    def test_package_import_has_no_runtime_side_effects(self):
+        """Importing modules must not start commands, notifications or create logs."""
+        code = (
+            'import sys\n'
+            'from unittest.mock import patch\n'
+            f'sys.path.insert(0, {str(SCRIPT.parent)!r})\n'
+            'with patch("subprocess.Popen", side_effect=AssertionError("No process on import")), '
+            'patch("os.makedirs", side_effect=AssertionError("No log directory on import")):\n'
+            '    from pbs_backup import app, backup, cli, logging_utils, notifications\n'
+            '    assert cli.SCRIPT_DIR == __import__("pathlib").Path(sys.path[0])\n'
+        )
+        result = subprocess.run([sys.executable, '-B', '-c', code], cwd=self.tmp.name,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_original_defaults(self):
         """Keep all guests, snapshot, zstd, unlimited bandwidth, and MQTT defaults."""
@@ -73,7 +108,7 @@ class BackupTests(unittest.TestCase):
         self.assertFalse(args.mqtt_tls or args.mqtt_insecure or args.mqtt_retain)
         self.assertIsNone(args.timeout)
         self.assertFalse(args.dry_run_mqtt or args.dry_run_email)
-        self.assertIn('--all', APP['build_vzdump_cmd'](args))
+        self.assertIn('--all', backup.build_vzdump_cmd(args))
 
     def test_invalid_input_rejected(self):
         """Reject inputs that could broaden selection or silently disable safeguards."""
@@ -93,8 +128,8 @@ class BackupTests(unittest.TestCase):
     def test_explicit_exclusions(self):
         """Subtract exclusions locally; never send conflicting VMIDs and --exclude."""
         args = self.args('--no-all', '--vmid', '0100', '101', '--exclude', '100')
-        APP['resolve_selection'](args)
-        cmd = APP['build_vzdump_cmd'](args)
+        backup.resolve_selection(args)
+        cmd = backup.build_vzdump_cmd(args)
         self.assertEqual(cmd[:4], ['vzdump', '101', '--all', '0'])
         self.assertNotIn('--exclude', cmd)
 
@@ -102,13 +137,13 @@ class BackupTests(unittest.TestCase):
         """Removing the last explicitly selected guest must not fall back to all."""
         args = self.args('--no-all', '--vmid', '100', '--exclude', '100')
         with self.assertRaises(ValueError):
-            APP['resolve_selection'](args)
+            backup.resolve_selection(args)
 
     def test_all_exclusions_single_list(self):
         """Forward every excluded guest as one Proxmox VMID-list value."""
         args = self.args('--exclude', '100', '101')
-        APP['resolve_selection'](args)
-        cmd = APP['build_vzdump_cmd'](args)
+        backup.resolve_selection(args)
+        cmd = backup.build_vzdump_cmd(args)
         self.assertEqual(cmd.count('--exclude'), 1)
         self.assertEqual(cmd[cmd.index('--exclude') + 1], '100,101')
 
@@ -121,35 +156,35 @@ class BackupTests(unittest.TestCase):
         for extra, expected in [(('--exclude', '101'), ['100']),
                                 (('--no-all', '--vmid', '101', '102', '103'), ['101'])]:
             args = self.args('--only-running', *extra)
-            with patch.object(G['shutil'], 'which', return_value='/mock/pvesh'), \
-                 patch.object(G['os'], 'uname', return_value=MagicMock(nodename='pve1.example')), \
-                 patch.object(G['subprocess'], 'run', return_value=MagicMock(stdout=json.dumps(guests))) as query:
-                APP['resolve_selection'](args)
+            with patch.object(shutil, 'which', return_value='/mock/pvesh'), \
+                 patch.object(os, 'uname', return_value=MagicMock(nodename='pve1.example')), \
+                 patch.object(subprocess, 'run', return_value=MagicMock(stdout=json.dumps(guests))) as query:
+                backup.resolve_selection(args)
                 self.assertEqual(query.call_args.args[0], ['pvesh', 'get', '/cluster/resources', '--type', 'vm', '--output-format', 'json'])
             self.assertEqual(args.vmid, expected)
             self.assertFalse(args.all)
-            self.assertNotIn('--only-running', APP['build_vzdump_cmd'](args))
+            self.assertNotIn('--only-running', backup.build_vzdump_cmd(args))
 
     def test_running_query_failures(self):
         """Missing tools, invalid inventory, and query failures cannot trigger backups."""
-        with patch.object(G['shutil'], 'which', return_value=None):
+        with patch.object(shutil, 'which', return_value=None):
             with self.assertRaises(ValueError):
-                APP['resolve_selection'](self.args('--only-running'))
+                backup.resolve_selection(self.args('--only-running'))
         for data in ['[]', '{}', '[123]', 'not json']:
-            with patch.object(G['shutil'], 'which', return_value='/mock/pvesh'), \
-                 patch.object(G['subprocess'], 'run', return_value=MagicMock(stdout=data)):
+            with patch.object(shutil, 'which', return_value='/mock/pvesh'), \
+                 patch.object(subprocess, 'run', return_value=MagicMock(stdout=data)):
                 with self.assertRaises(ValueError):
-                    APP['resolve_selection'](self.args('--only-running'))
+                    backup.resolve_selection(self.args('--only-running'))
         for error in [subprocess.CalledProcessError(1, 'pvesh'), subprocess.TimeoutExpired('pvesh', 30)]:
-            with patch.object(G['shutil'], 'which', return_value='/mock/pvesh'), \
-                 patch.object(G['subprocess'], 'run', side_effect=error):
+            with patch.object(shutil, 'which', return_value='/mock/pvesh'), \
+                 patch.object(subprocess, 'run', side_effect=error):
                 with self.assertRaises(subprocess.SubprocessError):
-                    APP['resolve_selection'](self.args('--only-running'))
+                    backup.resolve_selection(self.args('--only-running'))
 
     def test_literal_arguments(self):
         """Keep notes as a single argv value, without shell interpolation."""
         note = '{{guestname}}; $(touch /not-executed)'
-        cmd = APP['build_vzdump_cmd'](self.args('--notes-template', note, '--quiet', '--mailto', 'a@example.invalid', '--mailnotification', 'failure'))
+        cmd = backup.build_vzdump_cmd(self.args('--notes-template', note, '--quiet', '--mailto', 'a@example.invalid', '--mailnotification', 'failure'))
         self.assertEqual(cmd[cmd.index('--notes-template') + 1], note)
         self.assertEqual(cmd[cmd.index('--quiet') + 1], '1')
         self.assertIn('a@example.invalid', cmd)
@@ -193,14 +228,14 @@ class BackupTests(unittest.TestCase):
 
     def test_launch_failure_returns_error(self):
         """A missing executable produces rc=255 so main can publish failure."""
-        with patch.object(G['subprocess'], 'Popen', side_effect=FileNotFoundError('missing')):
+        with patch.object(subprocess, 'Popen', side_effect=FileNotFoundError('missing')):
             self.assertEqual(self.run_child('pass'), 255)
         self.assertIn('missing', Path(self.errfile).read_text())
 
     def test_dry_run_never_launches_child(self):
         """The streaming helper's dry-run branch must not spawn any process."""
-        with patch.object(G['subprocess'], 'Popen') as spawn:
-            self.assertEqual(APP['run_command_stream'](['vzdump'], self.logger, self.logfile, self.errfile, dry_run=True), 0)
+        with patch.object(subprocess, 'Popen') as spawn:
+            self.assertEqual(backup.run_command_stream(['vzdump'], self.logger, self.logfile, self.errfile, dry_run=True), 0)
             spawn.assert_not_called()
 
     def test_main_dry_run_never_publishes(self):
@@ -236,13 +271,13 @@ class BackupTests(unittest.TestCase):
     def test_payload_mapping(self):
         """Status derives from rc and err_file reflects file content, not success."""
         for code, expected in [(0, 'success'), (9, 'error')]:
-            with patch.dict(G, mqtt_publish=MagicMock()):
-                APP['publish_backup_status'](rc=code, duration_s=3, node='pve1', storage='pbs',
+            with patch.multiple(notifications, mqtt_publish=MagicMock()):
+                notifications.publish_backup_status(rc=code, duration_s=3, node='pve1', storage='pbs',
                     log_file=self.logfile, err_file=self.errfile, mqtt_host='invalid', mqtt_port=1883,
                     mqtt_topic='test', mqtt_user=None, mqtt_pass=None, mqtt_tls=False, mqtt_cafile=None,
                     mqtt_insecure=False, mqtt_client_id='test', mqtt_retain=False, mqtt_qos=1,
                     mqtt_timeout=15, logger=self.logger)
-                payload = G['mqtt_publish'].call_args.kwargs['payload']
+                payload = notifications.mqtt_publish.call_args.kwargs['payload']
                 self.assertEqual(payload['status'], expected)
                 self.assertIsNone(payload['err_file'])
 
@@ -255,15 +290,15 @@ class BackupTests(unittest.TestCase):
                 mqtt.Client.side_effect = [TypeError('legacy'), client] if legacy else None
                 mqtt.Client.return_value = client
                 client.publish.return_value.is_published.return_value = completed
-                with patch.dict(G, mqtt=mqtt):
+                with patch.multiple(notifications, mqtt=mqtt):
                     kwargs = dict(host='invalid', port=8883, topic='test', payload={'rc': 0},
                         username='u', password='p', tls=True, cafile='ca.pem', insecure=False,
                         client_id='test', retain=True, qos=1, logger=self.logger)
                     if completed:
-                        APP['mqtt_publish'](**kwargs)
+                        notifications.mqtt_publish(**kwargs)
                     else:
                         with self.assertRaises(TimeoutError):
-                            APP['mqtt_publish'](**kwargs)
+                            notifications.mqtt_publish(**kwargs)
                 client.username_pw_set.assert_called_once_with('u', password='p')
                 client.tls_set.assert_called_once_with(ca_certs='ca.pem')
                 client.tls_insecure_set.assert_not_called()
@@ -277,7 +312,7 @@ class BackupTests(unittest.TestCase):
         """Parse TOML without required CLI settings to exercise config-first usage."""
         self.config.write_text(text)
         with patch.object(sys, 'argv', ['pbs-backup', '--config', str(self.config), *overrides]):
-            return APP['parse_args']()
+            return cli.parse_args()
 
     def valid_config(self):
         """Provide minimal configured destinations, leaving other settings at defaults."""
@@ -287,7 +322,7 @@ class BackupTests(unittest.TestCase):
         """Use TOML alone and let an explicit CLI value override it without losing others."""
         args = self.config_args(self.valid_config())
         self.assertEqual((args.storage, args.mqtt_host, args.mqtt_topic), ('pbs-test', 'broker.invalid', 'test/backup'))
-        self.assertEqual(args.log_dir, str(G['SCRIPT_DIR'] / 'logs'))
+        self.assertEqual(args.log_dir, str(cli.SCRIPT_DIR / 'logs'))
         args = self.config_args(self.valid_config(), '--storage', 'override', '--dry-run')
         self.assertEqual(args.storage, 'override')
         self.assertEqual(args.mqtt_host, 'broker.invalid')
@@ -300,7 +335,7 @@ class BackupTests(unittest.TestCase):
         expected = vars(self.config_args(template))
         for transform in (str.lower, str.title):
             text = template
-            for section in G['CONFIG_SECTIONS']:
+            for section in cli.CONFIG_SECTIONS:
                 text = text.replace('[' + section.upper() + ']', '[' + transform(section) + ']')
             self.assertEqual(vars(self.config_args(text)), expected)
 
@@ -324,8 +359,8 @@ class BackupTests(unittest.TestCase):
         appdir = Path(self.tmp.name)
         for name in ('config.example.toml', 'pbs-backup.toml'):
             (appdir / name).write_text(self.valid_config())
-        with patch.dict(G, SCRIPT_DIR=appdir), patch.object(sys, 'argv', ['pbs-backup']), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
-            APP['parse_args']()
+        with patch.multiple(cli, SCRIPT_DIR=appdir), patch.object(sys, 'argv', ['pbs-backup']), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            cli.parse_args()
         self.assertEqual(caught.exception.code, 2)
 
     def test_config_all_options(self):
@@ -337,11 +372,11 @@ class BackupTests(unittest.TestCase):
         self.assertIsNone(args.timeout)
         self.assertIsNone(args.mqtt_pass)
         self.assertIsNone(args.mqtt_cafile)
-        data = G['tomllib'].loads(text)
-        self.assertEqual(sum(len(section) for section in data.values()), sum(map(len, G['CONFIG_SECTIONS'].values())))
+        data = cli.tomllib.loads(text)
+        self.assertEqual(sum(len(section) for section in data.values()), sum(map(len, cli.CONFIG_SECTIONS.values())))
         text = text.replace('all = true\n', 'all = false\n').replace('vmid = []', 'vmid = [100, "0101"]').replace('exclude = []', 'exclude = [100]')
         args = self.config_args(text)
-        APP['resolve_selection'](args)
+        backup.resolve_selection(args)
         self.assertEqual(args.vmid, ['101'])
 
     def test_config_invalid_types_keys_and_choices(self):
@@ -371,17 +406,18 @@ class BackupTests(unittest.TestCase):
         self.config.unlink()
         with patch.object(sys, 'argv', ['pbs-backup', '--config', str(self.config)]), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                APP['parse_args']()
-        with patch.dict(G, tomllib=None), contextlib.redirect_stderr(io.StringIO()):
+                cli.parse_args()
+        with patch.multiple(cli, tomllib=None), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 self.config_args(self.valid_config())
 
     def test_help_and_version_without_config(self):
         """Inspection commands work even if TOML/Paho/config files are unavailable."""
         for flag in ['--help', '--version']:
-            with patch.dict(G, tomllib=None, mqtt=None), patch.object(sys, 'argv', ['pbs-backup', '--config', '/missing', flag]), contextlib.redirect_stdout(io.StringIO()):
+            with patch.multiple(cli, tomllib=None), \
+                 patch.multiple(notifications, mqtt=None), patch.object(sys, 'argv', ['pbs-backup', '--config', '/missing', flag]), contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit) as caught:
-                    APP['parse_args']()
+                    cli.parse_args()
                 self.assertEqual(caught.exception.code, 0)
 
     def test_config_relative_paths(self):
@@ -389,7 +425,7 @@ class BackupTests(unittest.TestCase):
         text = self.valid_config() + 'tls=true\ncafile="certs/ca.pem"\n[logging]\nlog_dir="mylogs"\n'
         args = self.config_args(text)
         self.assertEqual(args.mqtt_cafile, str(self.config.parent.resolve() / 'certs/ca.pem'))
-        self.assertEqual(args.log_dir, str(G['SCRIPT_DIR'] / 'mylogs'))
+        self.assertEqual(args.log_dir, str(cli.SCRIPT_DIR / 'mylogs'))
 
     def test_no_flags_creates_script_local_logs(self):
         """Run a configured preview from another cwd without backup/MQTT side effects."""
@@ -398,16 +434,21 @@ class BackupTests(unittest.TestCase):
         (appdir / 'config.toml').write_text(self.valid_config().replace('[mqtt]', 'dry_run=true\n[mqtt]'))
         old_cwd = Path.cwd()
         try:
-            G['os'].chdir(self.tmp.name)
-            with patch.dict(G, SCRIPT_DIR=appdir, is_root=lambda: True, mqtt=object(), publish_backup_status=MagicMock()),                  patch.object(G['shutil'], 'which', return_value='/mock/vzdump'),                  patch.object(G['subprocess'], 'Popen') as spawn,                  patch.object(sys, 'argv', ['pbs-backup']), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(APP['main'](), 0)
+            os.chdir(self.tmp.name)
+            with patch.multiple(cli, SCRIPT_DIR=appdir), \
+                 patch.multiple(app, is_root=lambda: True), \
+                 patch.multiple(notifications, mqtt=object(), publish_backup_status=MagicMock()), \
+                 patch.object(shutil, 'which', return_value='/mock/vzdump'), \
+                 patch.object(subprocess, 'Popen') as spawn, \
+                 patch.object(sys, 'argv', ['pbs-backup']), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(app.main(), 0)
                 spawn.assert_not_called()
-                G['publish_backup_status'].assert_not_called()
+                notifications.publish_backup_status.assert_not_called()
             self.assertEqual(len(list((appdir / 'logs').glob('*.log'))), 1)
             self.assertFalse((Path(self.tmp.name) / 'logs').exists())
             self.assertFalse(any(f.stat().st_size for f in (appdir / 'logs').glob('*.err')))
         finally:
-            G['os'].chdir(old_cwd)
+            os.chdir(old_cwd)
 
     def test_success_keeps_error_log_empty(self):
         """INFO/WARN on stderr and incidental error words are not error messages."""
@@ -420,9 +461,9 @@ class BackupTests(unittest.TestCase):
         """Recognize explicit error levels, including guest/timestamp and TASK prefixes."""
         for line in ['ERROR: broken', 'TASK ERROR: broken', 'FATAL: broken', 'CRITICAL: broken',
                      '100: ERROR: broken', '100: 2026-09-24 12:34:56 ERROR: broken']:
-            self.assertTrue(APP['is_error_line'](line), line)
+            self.assertTrue(logging_utils.is_error_line(line), line)
         for line in ['INFO: ERROR: quoted text', 'WARN: temporary error', '0 errors', 'progress', 'not an ERROR: message']:
-            self.assertFalse(APP['is_error_line'](line), line)
+            self.assertFalse(logging_utils.is_error_line(line), line)
 
     def test_split_error_line_and_final_fragment(self):
         """Error filtering survives chunk splits and an error without a final newline."""
@@ -436,7 +477,7 @@ class BackupTests(unittest.TestCase):
     def test_wrapper_errors_and_logger_reinitialization(self):
         """Separate wrapper errors from INFO/WARN and switch paths between runs."""
         with contextlib.redirect_stdout(io.StringIO()):
-            logger = APP['setup_logger'](self.logfile, self.errfile)
+            logger = logging_utils.setup_logger(self.logfile, self.errfile)
             logger.info('ordinary progress')
             logger.warning('warning only')
             logger.error('MQTT publish failed: offline')
@@ -445,7 +486,7 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn('ordinary progress', error)
             self.assertNotIn('warning only', error)
             other = str(Path(self.tmp.name) / 'other')
-            logger = APP['setup_logger'](other + '.log', other + '.err')
+            logger = logging_utils.setup_logger(other + '.log', other + '.err')
             logger.error('second run')
             self.assertNotIn('second run', Path(self.errfile).read_text())
             self.assertIn('second run', Path(other + '.err').read_text())
@@ -471,15 +512,16 @@ class BackupTests(unittest.TestCase):
         mail = MagicMock(side_effect=email_error)
         publish = MagicMock(side_effect=mqtt_error)
         with patch.object(sys, 'argv', ['pbs-backup', '--config', str(self.config)]), \
-             patch.dict(G, is_root=lambda: True, mqtt=object(), send_dry_run_email=mail, publish_backup_status=publish), \
-             patch.object(G['shutil'], 'which', return_value='/mock/vzdump'), \
-             patch.object(G['subprocess'], 'Popen', side_effect=AssertionError('No backup allowed in notification tests')), \
+             patch.multiple(app, is_root=lambda: True), \
+             patch.multiple(notifications, mqtt=object(), send_dry_run_email=mail, publish_backup_status=publish), \
+             patch.object(shutil, 'which', return_value='/mock/vzdump'), \
+             patch.object(subprocess, 'Popen', side_effect=AssertionError('No backup allowed in notification tests')), \
              contextlib.redirect_stdout(io.StringIO()):
             if dry_run:
-                rc = APP['main']()
+                rc = app.main()
             else:
-                with patch.dict(G, run_command_stream=MagicMock(return_value=0)):
-                    rc = APP['main']()
+                with patch.multiple(app, run_command_stream=MagicMock(return_value=0)):
+                    rc = app.main()
         return rc, mail, publish
 
     def test_dry_run_notification_matrix(self):
@@ -517,13 +559,13 @@ class BackupTests(unittest.TestCase):
 
     def test_preview_mqtt_payload_and_routing(self):
         """Preview payload cannot look like backup success or replace retained real status."""
-        with patch.dict(G, mqtt_publish=MagicMock()):
-            APP['publish_backup_status'](rc=0, duration_s=0, node='pve1', storage='pbs',
+        with patch.multiple(notifications, mqtt_publish=MagicMock()):
+            notifications.publish_backup_status(rc=0, duration_s=0, node='pve1', storage='pbs',
                 log_file=self.logfile, err_file=self.errfile, mqtt_host='invalid', mqtt_port=8883,
                 mqtt_topic='backup/status', mqtt_user='test', mqtt_pass='secret', mqtt_tls=True,
                 mqtt_cafile='ca.pem', mqtt_insecure=False, mqtt_client_id='test', mqtt_retain=True,
                 mqtt_qos=2, mqtt_timeout=30, logger=self.logger, dry_run=True)
-            kwargs = G['mqtt_publish'].call_args.kwargs
+            kwargs = notifications.mqtt_publish.call_args.kwargs
             self.assertEqual(kwargs['topic'], 'backup/status/dry-run')
             self.assertFalse(kwargs['retain'])
             self.assertEqual(kwargs['qos'], 2)
@@ -540,8 +582,8 @@ class BackupTests(unittest.TestCase):
         for value in [None, '', 'a@', 'a@@b', 'Name <a@b>', 'a@b,,c@d', '-Xfile',
                       'a@b\nBcc: hidden@example.invalid', 'a@b\r\nX: test', 'a@b\x00']:
             with self.subTest(value=value), self.assertRaises(ValueError):
-                APP['dry_run_recipients'](value)
-        self.assertEqual(APP['dry_run_recipients']('a@example.invalid, root'), ['a@example.invalid', 'root'])
+                notifications.dry_run_recipients(value)
+        self.assertEqual(notifications.dry_run_recipients('a@example.invalid, root'), ['a@example.invalid', 'root'])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.args('--dry-run', '--dry-run-email')
         # A saved preview option must not change validation of real-run PVE recipients.
@@ -549,9 +591,9 @@ class BackupTests(unittest.TestCase):
 
     def test_email_message_and_submission(self):
         """Build an explicit preview email and send it via bounded stdin, not a backup subprocess."""
-        with patch.object(G['shutil'], 'which', return_value='/mock/sendmail'), \
-             patch.object(G['subprocess'], 'run', return_value=MagicMock(returncode=0)) as submit:
-            APP['send_dry_run_email'](mailto='a@example.invalid, root', node='pve1', storage='pbs',
+        with patch.object(shutil, 'which', return_value='/mock/sendmail'), \
+             patch.object(subprocess, 'run', return_value=MagicMock(returncode=0)) as submit:
+            notifications.send_dry_run_email(mailto='a@example.invalid, root', node='pve1', storage='pbs',
                 cmd=['vzdump', '--all', '--storage', 'pbs'], log_file=self.logfile,
                 err_file=self.errfile, logger=self.logger)
         self.assertEqual(submit.call_args.args[0], ['/mock/sendmail', '-i', '-t'])
@@ -569,17 +611,17 @@ class BackupTests(unittest.TestCase):
         """Surface missing sendmail, submission failure, and timeout without real delivery."""
         kwargs = dict(mailto='root', node='pve1', storage='pbs', cmd=['vzdump'],
                       log_file=self.logfile, err_file=self.errfile, logger=self.logger)
-        with patch.object(G['shutil'], 'which', return_value=None), patch.object(G['os'], 'access', return_value=False):
+        with patch.object(shutil, 'which', return_value=None), patch.object(os, 'access', return_value=False):
             with self.assertRaises(RuntimeError):
-                APP['send_dry_run_email'](**kwargs)
-        with patch.object(G['shutil'], 'which', return_value='/mock/sendmail'), \
-             patch.object(G['subprocess'], 'run', return_value=MagicMock(returncode=75, stderr=b'queue unavailable')):
+                notifications.send_dry_run_email(**kwargs)
+        with patch.object(shutil, 'which', return_value='/mock/sendmail'), \
+             patch.object(subprocess, 'run', return_value=MagicMock(returncode=75, stderr=b'queue unavailable')):
             with self.assertRaisesRegex(RuntimeError, 'queue unavailable'):
-                APP['send_dry_run_email'](**kwargs)
-        with patch.object(G['shutil'], 'which', return_value='/mock/sendmail'), \
-             patch.object(G['subprocess'], 'run', side_effect=subprocess.TimeoutExpired('sendmail', 30)):
+                notifications.send_dry_run_email(**kwargs)
+        with patch.object(shutil, 'which', return_value='/mock/sendmail'), \
+             patch.object(subprocess, 'run', side_effect=subprocess.TimeoutExpired('sendmail', 30)):
             with self.assertRaises(subprocess.TimeoutExpired):
-                APP['send_dry_run_email'](**kwargs)
+                notifications.send_dry_run_email(**kwargs)
 
     def test_notification_config_types_and_cli(self):
         """Preview options are strict TOML booleans, default off, and explicitly overridable."""
