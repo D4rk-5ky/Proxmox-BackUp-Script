@@ -77,7 +77,7 @@ class BackupTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, '-B', str(command), flag],
                                             cwd=self.tmp.name, capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn('0.0.5' if flag == '--version' else '--config', result.stdout)
+                    self.assertIn('0.0.6' if flag == '--version' else '--config', result.stdout)
             result = subprocess.run([sys.executable, '-B', str(command)], cwd=self.tmp.name,
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 2)
@@ -98,6 +98,100 @@ class BackupTests(unittest.TestCase):
         result = subprocess.run([sys.executable, '-B', '-c', code], cwd=self.tmp.name,
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_short_config_alias(self):
+        """-c and --config load the same file and preserve explicit option precedence."""
+        self.config.write_text(self.valid_config())
+        results = []
+        for flag in ('-c', '--config'):
+            with patch.object(sys, 'argv', ['pbs-backup', flag, str(self.config), '--storage', 'override']):
+                results.append(vars(cli.parse_args()))
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0]['storage'], 'override')
+
+    def test_notification_policy_matrix(self):
+        """Master switches and success settings never suppress enabled failure MQTT."""
+        for enabled in (False, True):
+            for on_success in (False, True):
+                for code in (0, 7, 255):
+                    flags = ('--mqtt-enabled' if enabled else '--no-mqtt-enabled',
+                             '--mqtt-on-success' if on_success else '--no-mqtt-on-success')
+                    with self.subTest(enabled=enabled, on_success=on_success, rc=code):
+                        rc, run, publish = self.call_main(flags, rc=code)
+                        self.assertEqual(rc, code)
+                        self.assertEqual(publish.call_count, int(enabled and (code != 0 or on_success)))
+        args = self.args()
+        self.assertTrue(args.mqtt_enabled)
+        self.assertFalse(args.mail_enabled or args.mail_on_success or args.mqtt_on_success)
+
+    def test_vzdump_mail_policy_matrix(self):
+        """Force legacy mail mode, failure-only default and an explicit disabled recipient list."""
+        for enabled in (False, True):
+            for on_success in (False, True):
+                args = self.args('--mailto', 'root',
+                    '--mail-enabled' if enabled else '--no-mail-enabled',
+                    '--mail-on-success' if on_success else '--no-mail-on-success')
+                cmd = backup.build_vzdump_cmd(args)
+                self.assertEqual(cmd[cmd.index('--notification-mode') + 1], 'legacy-sendmail')
+                self.assertEqual(cmd[cmd.index('--mailto') + 1], 'root' if enabled else '')
+                self.assertEqual(cmd[cmd.index('--mailnotification') + 1],
+                                 'always' if enabled and on_success else 'failure')
+
+    def test_notification_settings_validation(self):
+        """Reject wrong boolean types, missing mail recipients and contradictory legacy policies."""
+        for section in ('MAIL', 'MQTT'):
+            for key in ('enabled', 'on_success'):
+                for value in ('1', '"true"'):
+                    text = (self.valid_config().replace('[mqtt]', f'[mqtt]\n{key}={value}') if section == 'MQTT'
+                            else self.valid_config() + f'[MAIL]\n{key}={value}\n')
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        self.config_args(text)
+        self.config.write_text('')
+        for flags in [('--mail-enabled',), ('--mailnotification', 'always'),
+                      ('--mail-on-success', '--mailnotification', 'failure')]:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.args(*flags)
+        args = self.args('--mail-on-success', '--mailnotification', 'always')
+        self.assertTrue(args.mail_on_success)
+        text = self.valid_config() + '[MAIL]\nenabled=true\non_success=true\nmailto="root"\n'
+        args = self.config_args(text, '--no-mail-enabled', '--no-mail-on-success', '--no-mqtt-enabled')
+        self.assertFalse(args.mail_enabled or args.mail_on_success or args.mqtt_enabled)
+
+    def test_disabled_mqtt_needs_no_broker_or_paho(self):
+        """Explicitly disabling the channel permits operation without broker config or Paho."""
+        self.config_args('[BACKUP]\nstorage="pbs"\n[MQTT]\nenabled=false\n')
+        rc, run, publish = self.call_main(('--no-mqtt-enabled',), mqtt=None, rc=7)
+        self.assertEqual(rc, 7)
+        run.assert_called_once()
+        publish.assert_not_called()
+
+    def test_preview_channel_master_switches(self):
+        """Preview opt-ins cannot bypass a disabled channel and ignore success-only settings."""
+        for mail_enabled in (False, True):
+            for mqtt_enabled in (False, True):
+                for on_success in (False, True):
+                    flags = ['--dry-run', '--dry-run-email', '--dry-run-mqtt', '--mailto', 'root',
+                             '--mail-enabled' if mail_enabled else '--no-mail-enabled',
+                             '--mqtt-enabled' if mqtt_enabled else '--no-mqtt-enabled',
+                             '--mail-on-success' if on_success else '--no-mail-on-success',
+                             '--mqtt-on-success' if on_success else '--no-mqtt-on-success']
+                    with patch.object(notifications, 'send_dry_run_email') as send:
+                        rc, run, publish = self.call_main(flags)
+                    self.assertEqual(rc, 0)
+                    self.assertTrue(run.call_args.kwargs['dry_run'])
+                    self.assertEqual(send.call_count, int(mail_enabled))
+                    self.assertEqual(publish.call_count, int(mqtt_enabled))
+
+    def test_frozen_application_paths(self):
+        """Frozen config and logs follow the executable, never the internal extraction directory."""
+        executable = Path(self.tmp.name) / 'bundle' / 'pbs-backup'
+        with patch.object(sys, 'frozen', True, create=True), patch.object(sys, 'executable', str(executable)):
+            directory = cli.application_directory()
+        self.assertEqual(directory, executable.resolve().parent)
+        with patch.object(cli, 'SCRIPT_DIR', directory):
+            args = self.config_args(self.valid_config())
+            self.assertEqual(args.log_dir, str(directory / 'logs'))
+        self.assertEqual(cli.application_directory(), SCRIPT.parent)
 
     def test_original_defaults(self):
         """Keep all guests, snapshot, zstd, unlimited bandwidth, and MQTT defaults."""
@@ -184,7 +278,7 @@ class BackupTests(unittest.TestCase):
     def test_literal_arguments(self):
         """Keep notes as a single argv value, without shell interpolation."""
         note = '{{guestname}}; $(touch /not-executed)'
-        cmd = backup.build_vzdump_cmd(self.args('--notes-template', note, '--quiet', '--mailto', 'a@example.invalid', '--mailnotification', 'failure'))
+        cmd = backup.build_vzdump_cmd(self.args('--notes-template', note, '--quiet', '--mail-enabled', '--mailto', 'a@example.invalid', '--mailnotification', 'failure'))
         self.assertEqual(cmd[cmd.index('--notes-template') + 1], note)
         self.assertEqual(cmd[cmd.index('--quiet') + 1], '1')
         self.assertIn('a@example.invalid', cmd)
@@ -264,7 +358,7 @@ class BackupTests(unittest.TestCase):
     def test_backup_results_and_mqtt_failure(self):
         """Publish actual run results; preserve backup exit status if MQTT fails."""
         for code in [0, 7, 255]:
-            rc, run, publish = self.call_main(rc=code, publish_error=RuntimeError('offline'))
+            rc, run, publish = self.call_main(('--mqtt-on-success',), rc=code, publish_error=RuntimeError('offline'))
             self.assertEqual(rc, code)
             self.assertEqual(publish.call_args.kwargs['rc'], code)
 
@@ -494,7 +588,7 @@ class BackupTests(unittest.TestCase):
     def test_preflight_and_mqtt_errors_written(self):
         """Capture runtime preflight/MQTT failures in .err without progress noise."""
         self.call_main(root=False)
-        self.call_main(publish_error=RuntimeError('broker offline'))
+        self.call_main(rc=7, publish_error=RuntimeError('broker offline'))
         errors = '\n'.join(f.read_text() for f in Path(self.tmp.name).glob('*.err'))
         self.assertIn('Must run as root', errors)
         self.assertIn('MQTT publish failed', errors)
@@ -507,7 +601,7 @@ class BackupTests(unittest.TestCase):
         config = self.valid_config().replace('[mqtt]',
             f'dry_run={str(dry_run).lower()}\ndry_run_mqtt={str(mqtt_enabled).lower()}\n'
             f'dry_run_email={str(email_enabled).lower()}\n[mqtt]')
-        config += f'[mail]\nmailto="admin@example.invalid"\n[logging]\nlog_dir="{self.tmp.name}"\n'
+        config += f'[mail]\nenabled=true\nmailto="admin@example.invalid"\n[logging]\nlog_dir="{self.tmp.name}"\n'
         self.config.write_text(config)
         mail = MagicMock(side_effect=email_error)
         publish = MagicMock(side_effect=mqtt_error)
@@ -554,8 +648,7 @@ class BackupTests(unittest.TestCase):
         rc, mail, publish = self.run_notifications(True, True, dry_run=False)
         self.assertEqual(rc, 0)
         mail.assert_not_called()
-        publish.assert_called_once()
-        self.assertFalse(publish.call_args.kwargs['dry_run'])
+        publish.assert_not_called()  # Real success is now silent by default.
 
     def test_preview_mqtt_payload_and_routing(self):
         """Preview payload cannot look like backup success or replace retained real status."""
@@ -566,7 +659,7 @@ class BackupTests(unittest.TestCase):
                 mqtt_cafile='ca.pem', mqtt_insecure=False, mqtt_client_id='test', mqtt_retain=True,
                 mqtt_qos=2, mqtt_timeout=30, logger=self.logger, dry_run=True)
             kwargs = notifications.mqtt_publish.call_args.kwargs
-            self.assertEqual(kwargs['topic'], 'backup/status/dry-run')
+            self.assertEqual(kwargs['topic'], 'backup/status')
             self.assertFalse(kwargs['retain'])
             self.assertEqual(kwargs['qos'], 2)
             payload = kwargs['payload']
@@ -585,7 +678,7 @@ class BackupTests(unittest.TestCase):
                 notifications.dry_run_recipients(value)
         self.assertEqual(notifications.dry_run_recipients('a@example.invalid, root'), ['a@example.invalid', 'root'])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            self.args('--dry-run', '--dry-run-email')
+            self.args('--dry-run', '--mail-enabled', '--dry-run-email')
         # A saved preview option must not change validation of real-run PVE recipients.
         self.args('--dry-run-email', '--mailto', 'pve-user@pam')
 
@@ -629,7 +722,7 @@ class BackupTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.config_args(self.valid_config().replace('[mqtt]', f'{key}="true"\n[mqtt]'))
         self.config.write_text('')
-        args = self.args('--dry-run', '--dry-run-mqtt', '--dry-run-email', '--mailto', 'root')
+        args = self.args('--dry-run', '--dry-run-mqtt', '--dry-run-email', '--mail-enabled', '--mailto', 'root')
         self.assertTrue(args.dry_run_mqtt and args.dry_run_email)
 
 

@@ -3,14 +3,21 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
 from . import __version__
 from .notifications import dry_run_recipients
 
-# The launcher and user config live above this package, not inside it.
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
+def application_directory() -> Path:
+    """Locate external config/logs beside the launcher or frozen executable."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+SCRIPT_DIR = application_directory()
 
 try:
     import tomllib
@@ -20,14 +27,14 @@ except ImportError:
     except ImportError:
         tomllib = None
 
-# TOML keys use the existing argparse destinations; MQTT drops its repeated prefix.
+# TOML keys reuse argparse destinations; MQTT and MAIL drop repeated prefixes.
 CONFIG_SECTIONS = {
     "selection": ("all", "vmid", "exclude"),
     "backup": ("storage", "mode", "compress", "bwlimit", "only_running", "quiet",
                "timeout", "notes_template", "dry_run", "dry_run_mqtt", "dry_run_email"),
-    "mail": ("mailto", "mailnotification"),
+    "mail": ("mail_enabled", "mail_on_success", "mailto", "mailnotification"),
     "logging": ("log_dir", "log_prefix"),
-    "mqtt": ("mqtt_host", "mqtt_port", "mqtt_topic", "mqtt_user", "mqtt_pass",
+    "mqtt": ("mqtt_enabled", "mqtt_on_success", "mqtt_host", "mqtt_port", "mqtt_topic", "mqtt_user", "mqtt_pass",
              "mqtt_qos", "mqtt_retain", "mqtt_timeout", "mqtt_client_id",
              "mqtt_tls", "mqtt_cafile", "mqtt_insecure"),
 }
@@ -56,7 +63,7 @@ def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
         seen_sections.add(section)
         if section not in CONFIG_SECTIONS or not isinstance(values, dict):
             parser.error(f"Unknown or invalid TOML section: {section}.")
-        keys = {dest.removeprefix("mqtt_") if section == "mqtt" else dest: dest
+        keys = {dest.removeprefix(section + "_") if section in ("mqtt", "mail") else dest: dest
                 for dest in CONFIG_SECTIONS[section]}
         for key, value in values.items():
             label = f"{section}.{key}"
@@ -68,7 +75,7 @@ def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
                 if not isinstance(value, list) or any(type(item) not in (str, int) for item in value):
                     parser.error(f"{label} must be an array of guest IDs (strings or integers).")
                 value = [str(item) for item in value]
-            elif isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+            elif isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction, argparse.BooleanOptionalAction)):
                 if type(value) is not bool:
                     parser.error(f"{label} must be true or false (without quotes).")
             elif action.type is int:
@@ -81,7 +88,7 @@ def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
                     parser.error(f"{label} must be a quoted string.")
                 if action.default is None and value == "":
                     value = None
-            if action.choices is not None and value not in action.choices:
+            if action.choices is not None and value is not None and value not in action.choices:
                 parser.error(f"{label} must be one of: {', '.join(map(str, action.choices))}.")
             defaults[dest] = value
     if defaults.get("mqtt_cafile"):
@@ -92,10 +99,10 @@ def load_config(path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Load settings from config.toml beside this script. Optional flags override TOML. Dry-run notifications require explicit opt-in.",
+        description="Load settings from config.toml beside the launcher/executable. Optional flags override TOML. Dry-run notifications require explicit opt-in.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--config", default=str(SCRIPT_DIR / "config.toml"), help="TOML settings file; relative paths use the working directory.")
+    p.add_argument("-c", "--config", default=str(SCRIPT_DIR / "config.toml"), help="TOML settings file; relative paths use the working directory.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sel = p.add_argument_group("Selection")
@@ -116,18 +123,22 @@ def parse_args() -> argparse.Namespace:
     vzd.add_argument("--notes-template", default=None, help="vzdump template, e.g. '{{guestname}} on {{node}}'; passed literally.")
     vzd.add_argument("--dry-run", action="store_true", help="Preview without backup; notifications are off unless dry-run-mqtt/email is enabled; preflight checks remain.")
 
-    vzd.add_argument("--dry-run-mqtt", action="store_true", help="During dry-run only, publish a labelled non-retained preview to <mqtt-topic>/dry-run.")
-    vzd.add_argument("--dry-run-email", action="store_true", help="During dry-run only, submit a labelled preview email via local sendmail to --mailto (30-second submission timeout).")
+    vzd.add_argument("--dry-run-mqtt", action="store_true", help="During dry-run only, publish a labelled non-retained preview to the normal MQTT topic; requires MQTT.enabled.")
+    vzd.add_argument("--dry-run-email", action="store_true", help="During dry-run only, submit a labelled preview email via local sendmail to --mailto; requires mail-enabled (30-second submission timeout).")
 
-    mail = p.add_argument_group("vzdump email options (optional)")
-    mail.add_argument("--mailto", default=None, help="vzdump email recipients; depends on PVE notification configuration, independent of MQTT.")
-    mail.add_argument("--mailnotification", default=None, help='vzdump email policy, e.g. always or failure; passed through to installed PVE.')
+    mail = p.add_argument_group("Email delivery and success policy")
+    mail.add_argument("--mail-enabled", action=argparse.BooleanOptionalAction, default=False, help="Enable mail delivery; requires mailto. Disabling also suppresses opted-in preview email.")
+    mail.add_argument("--mail-on-success", action=argparse.BooleanOptionalAction, default=False, help="Send real-backup success mail as well as failures when mail is enabled; previews use dry-run-email separately.")
+    mail.add_argument("--mailto", default=None, help="Mail recipients; required when mail-enabled. Real backups use vzdump legacy-sendmail; previews use local sendmail.")
+    mail.add_argument("--mailnotification", default=None, choices=['always', 'failure'], help='Optional legacy policy assertion; must match mail-on-success (always when true, failure when false). Omit/empty to derive automatically.')
 
     log = p.add_argument_group("Logging")
-    log.add_argument("--log-dir", default="logs", help="Log directory; relative paths are anchored beside the script; created automatically.")
+    log.add_argument("--log-dir", default="logs", help="Log directory; relative paths are anchored beside the launcher/executable; created automatically.")
     log.add_argument("--log-prefix", default="pbs-backup", help="Log filename prefix, without directory components.")
 
     mqttg = p.add_argument_group("MQTT")
+    mqttg.add_argument("--mqtt-enabled", action=argparse.BooleanOptionalAction, default=True, help="Enable MQTT failure notifications; disabling also suppresses opted-in previews and removes the Paho/host/topic requirement.")
+    mqttg.add_argument("--mqtt-on-success", action=argparse.BooleanOptionalAction, default=False, help="Also publish real-backup success when MQTT is enabled. Failures remain enabled; previews use dry-run-mqtt separately.")
     mqttg.add_argument("--mqtt-host", default=None, help="MQTT broker host/IP")
     mqttg.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port (1..65535); TLS does not change the port automatically.")
     mqttg.add_argument("--mqtt-topic", default=None, help="MQTT topic (e.g. proxmox/backup/pbs)")
@@ -163,9 +174,11 @@ def parse_args() -> argparse.Namespace:
         p.error("--timeout must be positive; use BACKUP.timeout = 0 in TOML for no deadline.")
     if args.mqtt_timeout <= 0 or not 1 <= args.mqtt_port <= 65535:
         p.error("--mqtt-timeout must be positive and --mqtt-port must be 1..65535.")
-    if any(not value or not value.strip() for value in (args.storage, args.mqtt_host, args.mqtt_topic)):
-        p.error("Set BACKUP.storage, MQTT.host and MQTT.topic in TOML (or supply their CLI overrides).")
-    if any(char in args.mqtt_topic for char in ("+", "#", "\x00")):
+    if not args.storage or not args.storage.strip():
+        p.error("Set BACKUP.storage in TOML (or --storage).")
+    if args.mqtt_enabled and any(not value or not value.strip() for value in (args.mqtt_host, args.mqtt_topic)):
+        p.error("Enabled MQTT requires MQTT.host and MQTT.topic (or their CLI overrides).")
+    if args.mqtt_topic and any(char in args.mqtt_topic for char in ("+", "#", "\x00")):
         p.error("--mqtt-topic must be a publish topic without wildcards or NUL.")
     if (args.mqtt_cafile or args.mqtt_insecure) and not args.mqtt_tls:
         p.error("--mqtt-cafile and --mqtt-insecure require --mqtt-tls.")
@@ -173,7 +186,12 @@ def parse_args() -> argparse.Namespace:
         p.error("--mqtt-pass requires --mqtt-user.")
     if not args.log_prefix or args.log_prefix in (".", "..") or os.path.basename(args.log_prefix) != args.log_prefix:
         p.error("--log-prefix must be a filename prefix, without directory components.")
-    if args.dry_run and args.dry_run_email:
+    if args.mail_enabled and (not args.mailto or not args.mailto.strip()):
+        p.error("Enabled mail requires MAIL.mailto (or --mailto).")
+    mail_policy = "always" if args.mail_on_success else "failure"
+    if args.mailnotification is not None and args.mailnotification != mail_policy:
+        p.error("MAIL.mailnotification must match MAIL.on_success: always when true, failure when false; leave it empty to derive automatically.")
+    if args.dry_run and args.mail_enabled and args.dry_run_email:
         try:
             dry_run_recipients(args.mailto)
         except ValueError as e:

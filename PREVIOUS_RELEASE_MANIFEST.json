@@ -1,14 +1,14 @@
 {
-  "source_archive": "Proxmox-BackUp-Script-0.0.4.zip",
-  "source_archive_sha256": "eee1a0c2f5941af0c31b821da89928ae497f58611f21682fab2548b8ec262f7c",
-  "source_version": "0.0.4",
-  "version": "0.0.5",
+  "source_archive": "Proxmox-BackUp-Script-0.0.5.zip",
+  "source_archive_sha256": "2ee3644457a0ba3591652d5b2686e17f5e4d1bccccae197ebcf3bcefb0fffe80",
+  "source_version": "0.0.5",
+  "version": "0.0.6",
   "previous_files": [
     {
       "relative_path": ".gitignore",
       "bytes": 532,
       "sha256": "34314d15a2dcc1495bda7b970fe83048bda3fb9512db8bcce9e1f00e3cffa9ed",
-      "release_status": "unchanged"
+      "release_status": "updated"
     },
     {
       "relative_path": "LEGAL.md",
@@ -18,75 +18,111 @@
     },
     {
       "relative_path": "ORIGINAL_MANIFEST.json",
-      "bytes": 1471,
-      "sha256": "f2c402c700d8b4d2d4cf26131cc9e0f10cff4e9385ce00669f3a9128be8bff64",
+      "bytes": 1649,
+      "sha256": "1ed9de170e42ffc0ab2c8d458118dc75200a5baf730a181df0d2da35803bae96",
       "release_status": "updated"
     },
     {
       "relative_path": "PREVIOUS_RELEASE_MANIFEST.json",
-      "bytes": 3078,
-      "sha256": "304f0a88c767d25870e1b0f26ad5c5f795a0fde31af078f3ea180a86ecdbbf26",
+      "bytes": 3605,
+      "sha256": "96444efab244846ce8b378065d83422f27c6982b040469dad0222dc717c5ad28",
       "release_status": "updated"
     },
     {
       "relative_path": "README.md",
-      "bytes": 23420,
-      "sha256": "fa9fbb45ac09e0a977e58524bee480467f6b3fdbcd50c956f36371ff4df00ef2",
+      "bytes": 24034,
+      "sha256": "f968e5bd9fb4d29a04c3992304c60a44ed434db7599136fc8dac8d7d3dd737b5",
       "release_status": "updated"
     },
     {
       "relative_path": "RELEASE_MANIFEST.sha256",
-      "bytes": 1241,
-      "sha256": "a2c378f8fb2af645460ae9bbd393655fdf0c727d86c810a16648bc89e4112cf9",
+      "bytes": 1773,
+      "sha256": "1e0a72d9d8cb1b4c7498904bbef05f3099cdef825764e47ac9e9b9980bc36347",
       "release_status": "updated"
     },
     {
       "relative_path": "VERIFICATION.md",
-      "bytes": 4755,
-      "sha256": "b5683d52ceee9bfd0a5828862d4ab70e903894edd67e02688842befc2963fc54",
+      "bytes": 5561,
+      "sha256": "fe53cd2876759aecb8ba97db82cd089aa3dce0422b3805de66a99eedcb59061f",
       "release_status": "updated"
     },
     {
       "relative_path": "VERSION",
       "bytes": 6,
-      "sha256": "cc1d02b83e7dc225d30784f2aa7676f9b7f7f68639b6b941f5b732425902f763",
+      "sha256": "ae86e790678acc7fc14f18e559c2f8c4972634d5b1b74a2a297565b8c90f804a",
       "release_status": "updated"
     },
     {
       "relative_path": "VERSIONING.md",
-      "bytes": 13408,
-      "sha256": "c815f8ad987604beb73039e0f6d5ac33cebe262f4956bbe169ac670cb19d44a1",
+      "bytes": 16453,
+      "sha256": "ad96d77f352579af2267feb5e45a96d36c9998be868152c28e7168394e756229",
       "release_status": "updated"
     },
     {
       "relative_path": "commented_code_map.md",
-      "bytes": 23840,
-      "sha256": "098cf5da36c2693e6158caf7bf464d2d259535a454f2ff300092f0c4ab034f4d",
+      "bytes": 27732,
+      "sha256": "2112ea68c01449ebf6f5bb26ffb84552b23fde0b4557611161dbe9ecde24de0f",
       "release_status": "updated"
     },
     {
       "relative_path": "config.example.sh",
       "bytes": 3162,
       "sha256": "9d934e3d5de63e1d43b002207ab194cdd235373082cda35d33a84d941cc87127",
-      "release_status": "unchanged"
+      "release_status": "updated"
     },
     {
       "relative_path": "config.example.toml",
       "bytes": 8027,
       "sha256": "78449cc4941f9120b16028efd50b34eb674b1c4a4e2ee22b4cd64187139a9665",
-      "release_status": "unchanged"
+      "release_status": "updated"
     },
     {
       "relative_path": "pbs-backup",
-      "bytes": 32002,
-      "sha256": "af13f57bac8db8a42365469c7ce552da5902bffe5998afc57f949964a97cfca4",
-      "release_status": "updated"
+      "bytes": 197,
+      "sha256": "e66a4444187158cf6f4ec3124ecb4eee0f7c0eef4a1ee701fe7d1f4d5dc0e937",
+      "release_status": "unchanged"
     },
     {
       "relative_path": "pbs-backup.toml",
       "bytes": 8171,
       "sha256": "6e457e5aebf4e3e4d8a5331318bd0c4e1819d73c316e476ad7bc120821de7601",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs_backup/__init__.py",
+      "bytes": 99,
+      "sha256": "85e00596dd3cb43bceb47e08aa4aaefeed4a02789654f41fbfbdb50f7d08bbaf",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs_backup/app.py",
+      "bytes": 4017,
+      "sha256": "5c5e7e66357a6d9a4c3f38ee7fc35dc807d518fd1c23163dc5c36aa6fd29e955",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs_backup/backup.py",
+      "bytes": 6685,
+      "sha256": "6c3b8f1c10292f11658288b67082c9a3c517aac52c920576bc982d7b9fe05681",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs_backup/cli.py",
+      "bytes": 11819,
+      "sha256": "4c33cf1af63f75ef9911951d06b3bf21bfff336e54a6a6940725269530288719",
+      "release_status": "updated"
+    },
+    {
+      "relative_path": "pbs_backup/logging_utils.py",
+      "bytes": 2293,
+      "sha256": "656b0c554d2c6647c35c01798ade6c47c0962e38b21172622db6ea16ae3096d0",
       "release_status": "unchanged"
+    },
+    {
+      "relative_path": "pbs_backup/notifications.py",
+      "bytes": 7500,
+      "sha256": "0cc51ad8da3a47bf6848f63364f6eb60379897eec7b617ca58813928456a28af",
+      "release_status": "updated"
     },
     {
       "relative_path": "requirements.txt",
@@ -96,18 +132,17 @@
     },
     {
       "relative_path": "tests/test_pbs_backup.py",
-      "bytes": 35101,
-      "sha256": "f682488ab75c70bf112edf412c5b3ad2cd582e74bf3b7bfe76c3c5503d9abb1e",
+      "bytes": 37552,
+      "sha256": "bf2ec3d79503449d0e580aaca7986245ec88f76457ac533b122b1fdee650047d",
       "release_status": "updated"
     }
   ],
   "removed_previous_files": [],
   "added_release_files": [
-    "pbs_backup/__init__.py",
-    "pbs_backup/app.py",
-    "pbs_backup/backup.py",
-    "pbs_backup/cli.py",
-    "pbs_backup/logging_utils.py",
-    "pbs_backup/notifications.py"
+    "build.py",
+    "homeassistant/README.md",
+    "homeassistant/pbs-backup.yaml",
+    "requirements-build.txt",
+    "tests/test_build.py"
   ]
 }

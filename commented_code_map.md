@@ -12,7 +12,7 @@ This map explains the current application, every function, and the commands used
 - `pbs_backup/notifications.py`: MQTT publication and optional dry-run email, reusing shared logging helpers.
 - `pbs_backup/logging_utils.py`: logging policy, error classification, log paths, timestamps and file helpers.
 - `README.md`: installation, complete flag reference, examples, results, and operational limits.
-- `config.example.toml`: fully commented, categorized template for all 30 settings; the only Git-allowed config example.
+- `config.example.toml`: fully commented, categorized template for all 34 settings; the only Git-allowed config example.
 - `config.toml`: private user-created settings loaded automatically; ignored by Git and absent from the ZIP.
 - `pbs-backup.toml`: preserved placeholder template, usable through an explicit `--config` path and ignored by Git.
 - `.gitignore`: ignores config-prefixed files and TOML at any depth, except the root template, plus runtime logs/caches/temporary files.
@@ -23,9 +23,9 @@ This map explains the current application, every function, and the commands used
 - `tests/test_pbs_backup.py`: isolated regression checks using standard-library unittest/mocks and harmless Python children.
 - `VERIFICATION.md`, `ORIGINAL_MANIFEST.json`, `PREVIOUS_RELEASE_MANIFEST.json`, and `RELEASE_MANIFEST.sha256`: verification limits and source/release file accounting.
 
-The launcher imports `pbs_backup.app.main` without executing it; its `__main__` guard calls `main` and raises `SystemExit` with its return code. `main` loads/validates TOML and optional CLI overrides, prepares script-local logs, checks root/tools/Paho, resolves guest selection, builds argv, runs or previews the backup, and publishes normal status after real runs or explicitly labelled preview notifications when opted in during dry-run. Actual backup exit codes are preserved on MQTT failure; a requested dry-run notification failure returns 3.
+The launcher imports `pbs_backup.app.main` without executing it; its `__main__` guard calls `main` and raises `SystemExit` with its return code. `main` loads/validates TOML and optional CLI overrides, prepares script-local logs, checks root/tools/Paho, resolves guest selection, builds argv, runs or previews the backup, and publishes enabled failures or opted-in success after real runs or explicitly labelled preview notifications when opted in during dry-run. Actual backup exit codes are preserved on MQTT failure; a requested dry-run notification failure returns 3.
 
-The optional Paho import in `notifications.py` preserves the original behavior of setting `mqtt = None` on an import failure. Help/version work anyway; normal execution and dry-run refuse to proceed without Paho. `pbs_backup.__version__` is used by `cli.py` for `--version` and kept equal to `VERSION`. The launcher imports no copied implementation. Python resolves the package beside the real launcher, including through a symlink; CLI path anchoring uses the package parent where the launcher resides.
+The optional Paho import in `notifications.py` preserves the original behavior of setting `mqtt = None` on an import failure. Help/version work anyway; normal execution and dry-run require Paho only when MQTT is enabled. `pbs_backup.__version__` is used by `cli.py` for `--version` and kept equal to `VERSION`. The launcher imports no copied implementation. Python resolves the package beside the real launcher, including through a symlink; CLI path anchoring uses the package parent where the launcher resides.
 
 ## Why these module boundaries
 
@@ -33,11 +33,11 @@ There are five functional modules and a minimal package initializer. Sizes inclu
 
 | Module | Lines | Responsibility and reason for grouping |
 | --- | ---: | --- |
-| `cli.py` | 185 | Keep TOML and CLI together: both use the same argparse definitions, choices, defaults and validation. Splitting these would spread one settings model across files. |
-| `backup.py` | 180 | Selection, command construction and subprocess execution form one backup operation. Keep streaming/deadline handling with the command it runs. |
+| `cli.py` | 203 | Keep TOML and CLI together: both use the same argparse definitions, choices, defaults and validation. Splitting these would spread one settings model across files. |
+| `backup.py` | 181 | Selection, command construction and subprocess execution form one backup operation. Keep streaming/deadline handling with the command it runs. |
 | `notifications.py` | 212 | MQTT transport/status functions have about 130 lines; email functions about 50. Together they form a manageable notification module. Separate mail/MQTT files would add boundaries without improving this code's current size or dependencies. |
 | `logging_utils.py` | 75 | One shared home for log creation, error severity filtering, timestamps and file checks, used by backup, notifications and the application. Avoid duplicate utility implementations. |
-| `app.py` | 123 | Keep the ordered lifecycle and exit-code decisions visible in one place, separate from parsing and transport details. The two-line root check belongs here rather than in its own module. |
+| `app.py` | 126 | Keep the ordered lifecycle and exit-code decisions visible in one place, separate from parsing and transport details. The two-line root check belongs here rather than in its own module. |
 
 Sync, verify, prune and garbage collection are not implemented in this project, so no speculative modules or commands are added. Future small related maintenance operations can initially share a module; split only when their implementation and dependencies justify it.
 
@@ -57,9 +57,11 @@ Imports form a one-way dependency graph: the launcher calls app; app uses cli, b
 | `notifications.mqtt_publish(...)` | Creates a Paho MQTT 3.1.1 client (v2 callbacks, falling back to older construction), applies auth/TLS, connects, starts its network loop, serializes JSON, publishes, and waits for completion. | Centralizes MQTT behavior. Verified TLS remains default when TLS is enabled. Disconnect/loop cleanup occurs in `finally` after the loop starts. Publish errors propagate to `main`; connection time is not bounded by `--mqtt-timeout`. |
 | `notifications.mqtt_publish.on_publish(...)` | Marks callback completion and logs message ID. | Allows callback completion to complement `is_published()` checking across supported Paho APIs; QoS 0 completion is local send only. |
 | `notifications.mqtt_publish.on_disconnect(...)` | Extracts/logs the reason using either v1 or v2 argument layout. | Avoids mistaking v2 disconnect flags for the reason code. |
-| `notifications.publish_backup_status(..., dry_run=False)` | Builds the existing normal payload, or an explicitly labelled dry-run payload with rc=null, dry_run=true, backup_executed=false, and preview_rc. Calls the same mqtt_publish function. | Previews append `/dry-run` to the topic and force non-retained publication to protect the real backup status. Real-run fields and routing stay unchanged. |
+| `notifications.publish_backup_status(..., dry_run=False)` | Builds the existing normal payload, or an explicitly labelled dry-run payload with rc=null, dry_run=true, backup_executed=false, and preview_rc. Calls the same mqtt_publish function. | Previews use the normal topic and force non-retained publication; explicit markers distinguish them from real results. Real-run fields and routing stay unchanged. |
 | `backup.resolve_selection(args)` | Removes explicitly excluded IDs and, when requested, queries Proxmox guest inventory and intersects selection with local running QEMU/LXC guests. Mutates `args` to contain the resolved selection. | Proxmox does not accept `--exclude` with explicit VMIDs or a `--only-running` option. Resolving these before command construction preserves the intended selection. No guests remaining is an error, never a fallback to all. Query errors are handled by `main` as preflight failures. |
-| `backup.build_vzdump_cmd(args)` | Builds one argv list from resolved selection, storage, backup settings, and optional mail arguments. | Reuses the original command builder and never invokes a shell. Explicit selections send `--all 0`; all-guest exclusions are one comma-separated value. MQTT/log/timeout controls stay in the wrapper. Call `resolve_selection` first. |
+| `backup.build_vzdump_cmd(args)` | Builds one argv list from resolved selection, storage, backup settings, and explicit derived mail policy. | Reuses the original command builder and never invokes a shell. Explicit selections send `--all 0`; all-guest exclusions are one comma-separated value. MQTT/log/timeout controls stay in the wrapper. Call `resolve_selection` first. |
+| `cli.application_directory()` | Resolves sys.executable when frozen, otherwise the package parent. | Keeps user config/logs outside bundled internal resources and independent of the working directory. |
+| `build.main()` | Validates platform/dependencies/output, runs PyInstaller in disposable work space, copies only public deployment files. | Collects app/Paho/Tomli dependencies, refuses to overwrite existing bundles, returns failure on build errors; external Proxmox/mail tools remain required. |
 | `cli.parse_args()` | Defines existing CLI controls, obtains the config path, merges validated TOML defaults, reapplies explicit CLI values, normalizes IDs/paths, and checks option relationships. | Reuses the original parser as the single source for operational types/defaults/choices. Precedence is CLI > TOML > built-ins. Help/version exit before config access. Invalid selection, ports, timeouts, TLS/password combinations, topics, and paths fail before a backup. |
 | `app.main()` | Loads config/options, initializes logs, checks prerequisites/selection, builds/runs or previews the command, then attempts appropriate notifications. | Never executes a dry-run backup. Both preview channels are opt-in and independently attempted; failures enter .err and return 3 for dry-run. Real-run email remains with vzdump, and MQTT failure preserves its backup exit code. |
 | `logging_utils.is_error_line(line)` | Tests explicit ERROR/TASK ERROR/FATAL/CRITICAL prefixes, optionally following numeric guest IDs and timestamps. | Prevents ordinary stderr, INFO/WARN, or incidental error words from being misclassified. Unlabelled diagnostics stay in the full log. |
@@ -68,7 +70,7 @@ Imports form a one-way dependency graph: the launcher calls app; app uses cli, b
 | `notifications.dry_run_recipients(value)` | Parses comma-separated bare ASCII email addresses or simple local aliases and rejects missing recipients, malformed addresses, leading command options, and control/header injection. | Reused by dry-run configuration validation and email submission. Does not change real-backup recipient handling or resolve PVE user IDs. |
 | `notifications.send_dry_run_email(...)` | Builds EmailMessage headers/body explicitly stating DRY-RUN and NO BACKUP EXECUTED; submits through local sendmail with a 30-second timeout. | Gives previews a mail path without invoking vzdump. Includes only planned command/host/storage/log paths; successful submission means local mail-service acceptance, not inbox delivery. |
 
-`cli.SCRIPT_DIR` resolves the parent of the package directory, preserving config/log placement beside the real launcher rather than inside the package. `cli.CONFIG_SECTIONS` maps TOML keys to parser destinations (MQTT drops the repeated `mqtt_` prefix). `logging_utils.ERROR_LINE` defines recognized severity prefixes. Python 3.11+ uses `tomllib`; 3.9/3.10 uses `tomli`. Absence of both is allowed for help/version but blocks normal startup.
+`cli.SCRIPT_DIR` calls application_directory(), using the real executable parent when frozen or package parent for source runs, so external config/logs remain beside the launcher. `cli.CONFIG_SECTIONS` maps TOML keys to parser destinations (MQTT and MAIL drop their repeated destination prefixes). `logging_utils.ERROR_LINE` defines recognized severity prefixes. Python 3.11+ uses `tomllib`; 3.9/3.10 uses `tomli`. Absence of both is allowed for help/version but blocks normal startup.
 
 ## App commands and option routing
 
@@ -77,7 +79,7 @@ No external command is executed through a shell. `shlex.quote` creates readable 
 | Command / wrapper flags | What executes and why |
 | --- | --- |
 | `pbs-backup` with no flags | Loads adjacent `config.toml`, creates the configured script-relative logs directory, and follows its dry-run/backup setting. |
-| `--config PATH` | Selects another TOML file; a relative path uses the working directory. It does not move the default logs directory. |
+| `-c PATH` / `--config PATH` | Selects another TOML file; a relative path uses the working directory. It does not move the default logs directory. |
 | `pbs-backup -h` / `--help` | Argparse displays command usage and exits. |
 | `pbs-backup --version` | Argparse prints the current version and exits. |
 | `--all` | Produces `vzdump --all ...`, selecting all guests on the node. |
@@ -86,11 +88,13 @@ No external command is executed through a shell. `shlex.quote` creates readable 
 | `--exclude ...` with explicit IDs | Subtracts IDs in `resolve_selection`; no conflicting exclusion option reaches `vzdump`. |
 | `--only-running` | Executes `pvesh get /cluster/resources --type vm --output-format json` with `check=True`, captured output, and a 30-second timeout. Filters `node`, `type`, `status`, and `vmid`; emits an explicit selection. The local node is the first component of `os.uname().nodename`. No inventory mutation occurs. |
 | `--storage`, `--mode`, `--compress`, `--bwlimit` | Always become their corresponding `vzdump` options, including the wrapper's default values. |
-| `--notes-template`, `--mailto`, `--mailnotification` | Passed as literal value pairs when supplied. Installed PVE governs support/notification behavior. |
+| `--notes-template` | Passed literally when supplied. |
+| `--mail-enabled`, `--no-mail-enabled`, `--mail-on-success`, `--no-mail-on-success`, `--mailto`, `--mailnotification` | Derive explicit vzdump legacy-sendmail, recipients or empty list, and always/failure policy. Keep enabled failure mail; reject contradictory legacy assertions. Preview email also needs its opt-in. |
+| `--mqtt-enabled`, `--no-mqtt-enabled`, `--mqtt-on-success`, `--no-mqtt-on-success` | Gate publication in app.main. Enabled real failures always attempt publication; success requires on_success; preview requires its independent opt-in. |
 | `--quiet` | Adds `vzdump --quiet 1`; does not silence wrapper logs. |
 | `--timeout` | Controls wrapper deadline/kill of its direct child; no `vzdump --timeout` is emitted. |
 | `--dry-run` | Logs the resolved command without starting vzdump. Default notifications are off; explicit preview opt-ins allow the dedicated notification paths. Log creation, preflight and optional inventory queries still occur. |
-| `--dry-run-mqtt` | During dry-run only, reuse MQTT publication with a labelled payload, `/dry-run` topic suffix, and retain=false. Uses existing connection options; default off. |
+| `--dry-run-mqtt` | During dry-run only, reuse MQTT publication with a labelled payload, the normal configured topic, and retain=false. Uses existing connection options; default off. |
 | `--dry-run-email` | During dry-run only, submit the labelled test email to mailto independently of mailnotification. Default off; does not cause extra email during real backups. |
 | `sendmail -i -t` | Read the serialized message from stdin, take validated recipients from To headers, and ignore a dot-only line as a terminator. No shell or backup command is executed; MTA routing is configured on the host. |
 | `--log-dir`, `--log-prefix` | Control local log paths; relative directories are script-relative and default to `logs/`. Never passed to `vzdump`. |
@@ -143,10 +147,14 @@ Every key below maps to the existing execution path in the command-routing table
 | `BACKUP.dry_run` | `dry_run` / `--dry-run` |
 | `BACKUP.dry_run_mqtt` | `dry_run_mqtt` / `--dry-run-mqtt` |
 | `BACKUP.dry_run_email` | `dry_run_email` / `--dry-run-email` |
+| `MAIL.enabled` | `mail_enabled` / `--mail-enabled` |
+| `MAIL.on_success` | `mail_on_success` / `--mail-on-success` |
 | `MAIL.mailto` | `mailto` / `--mailto` |
 | `MAIL.mailnotification` | `mailnotification` / `--mailnotification` |
 | `LOGGING.log_dir` | `log_dir` / `--log-dir` |
 | `LOGGING.log_prefix` | `log_prefix` / `--log-prefix` |
+| `MQTT.enabled` | `mqtt_enabled` / `--mqtt-enabled` |
+| `MQTT.on_success` | `mqtt_on_success` / `--mqtt-on-success` |
 | `MQTT.host` | `mqtt_host` / `--mqtt-host` |
 | `MQTT.port` | `mqtt_port` / `--mqtt-port` |
 | `MQTT.topic` | `mqtt_topic` / `--mqtt-topic` |
@@ -162,7 +170,7 @@ Every key below maps to the existing execution path in the command-routing table
 
 ## Every test function
 
-The test module imports the real package modules without invoking the launcher. Tests patch dependencies on their owning modules instead of a shared script globals dictionary. Fresh subprocesses also exercise the real launcher from another directory and through a symlink. Shared helpers isolate temporary files and external boundaries; no test contacts a broker or starts `vzdump`.
+Tests isolate external services with mocks and use harmless local Python children. No live backup or notification is sent.
 
 | Function | What it checks / why |
 | --- | --- |
@@ -171,8 +179,15 @@ The test module imports the real package modules without invoking the launcher. 
 | `BackupTests.args()` | Parse realistic command lines using the application's existing parser. |
 | `BackupTests.run_child()` | Run a harmless Python child through the real streaming/deadline code. |
 | `BackupTests.call_main()` | Mock external boundaries while retaining parsing and main orchestration. |
-| `BackupTests.test_launcher_from_other_directory_and_symlink()` | Exercise real package imports, help/version and missing-config safety from an unrelated working directory and through a symlink; config remains beside the real launcher. |
-| `BackupTests.test_package_import_has_no_runtime_side_effects()` | Import all modules in a fresh process while blocking subprocess creation and directory creation; verify config/log anchoring to the package parent. |
+| `BackupTests.test_launcher_from_other_directory_and_symlink()` | The real launcher finds its package/config from another cwd or a symlink. |
+| `BackupTests.test_package_import_has_no_runtime_side_effects()` | Importing modules must not start commands, notifications or create logs. |
+| `BackupTests.test_short_config_alias()` | -c and --config load the same file and preserve explicit option precedence. |
+| `BackupTests.test_notification_policy_matrix()` | Master switches and success settings never suppress enabled failure MQTT. |
+| `BackupTests.test_vzdump_mail_policy_matrix()` | Force legacy mail mode, failure-only default and an explicit disabled recipient list. |
+| `BackupTests.test_notification_settings_validation()` | Reject wrong boolean types, missing mail recipients and contradictory legacy policies. |
+| `BackupTests.test_disabled_mqtt_needs_no_broker_or_paho()` | Explicitly disabling the channel permits operation without broker config or Paho. |
+| `BackupTests.test_preview_channel_master_switches()` | Preview opt-ins cannot bypass a disabled channel and ignore success-only settings. |
+| `BackupTests.test_frozen_application_paths()` | Frozen config and logs follow the executable, never the internal extraction directory. |
 | `BackupTests.test_original_defaults()` | Keep all guests, snapshot, zstd, unlimited bandwidth, and MQTT defaults. |
 | `BackupTests.test_invalid_input_rejected()` | Reject inputs that could broaden selection or silently disable safeguards. |
 | `BackupTests.test_explicit_exclusions()` | Subtract exclusions locally; never send conflicting VMIDs and --exclude. |
@@ -197,10 +212,10 @@ The test module imports the real package modules without invoking the launcher. 
 | `BackupTests.config_args()` | Parse TOML without required CLI settings to exercise config-first usage. |
 | `BackupTests.valid_config()` | Provide minimal configured destinations, leaving other settings at defaults. |
 | `BackupTests.test_config_only_and_precedence()` | Use TOML alone and let an explicit CLI value override it without losing others. |
-| `BackupTests.test_config_category_casing()` | All categories resolve identically across case variants. |
-| `BackupTests.test_config_duplicate_categories_rejected()` | Duplicate category spellings fail even for disjoint keys. |
-| `BackupTests.test_config_key_casing_stays_strict()` | Option keys remain case-sensitive. |
-| `BackupTests.test_default_config_missing_never_loads_templates()` | Missing private config never falls back to a template. |
+| `BackupTests.test_config_category_casing()` | Resolve every category identically in uppercase, lowercase, or mixed case. |
+| `BackupTests.test_config_duplicate_categories_rejected()` | Never merge different spellings of the same category, even disjoint keys. |
+| `BackupTests.test_config_key_casing_stays_strict()` | Uppercase categories do not silently accept misspelled option keys. |
+| `BackupTests.test_default_config_missing_never_loads_templates()` | Missing private config fails even when configured templates are present. |
 | `BackupTests.test_config_all_options()` | Load all shipped keys and correctly convert unset strings, arrays and timeout. |
 | `BackupTests.test_config_invalid_types_keys_and_choices()` | Reject TOML typos, invalid choices and bool/integer confusion before running. |
 | `BackupTests.test_config_syntax_and_secret_not_echoed()` | Syntax errors and invalid password types must not dump secret-bearing values. |
@@ -223,4 +238,16 @@ The test module imports the real package modules without invoking the launcher. 
 | `BackupTests.test_email_transport_failures()` | Surface missing sendmail, submission failure, and timeout without real delivery. |
 | `BackupTests.test_notification_config_types_and_cli()` | Preview options are strict TOML booleans, default off, and explicitly overridable. |
 
-`unittest.main()` runs the class directly; discovery finds it too. Tests mock MQTT and sendmail and use temporary Python children for streaming/deadlines. No backup or real notification is sent.
+## Build and Home Assistant supporting commands
+
+`python3 -m venv .build-venv` creates the build environment; its Python runs `-m pip install -r requirements-build.txt` to install app and build dependencies, then `build.py` to create the full onedir deployment. `build.py --help` documents --output-dir and --work-dir, both directory parents with CLI-relative paths. PyInstaller is invoked as a module with --onedir/--console, --clean, --name, --distpath, --workpath, --specpath, --paths, --collect-submodules for pbs_backup and paho.mqtt, and --hidden-import tomli. These select bundle format, isolate outputs/cache, locate source and include dependencies. Build scratch space is removed on exit; failures can leave partial output. No private config is copied.
+
+`requirements-build.txt` adds PyInstaller and unconditional Tomli; `.gitignore` excludes .build-venv and generated specs. `homeassistant/pbs-backup.yaml` is a single automation: the MQTT trigger reads the normal topic, variables validate strict outcome markers, choose sets the outcome, shared notification actions apply eight YAML switches and serialize complete JSON (fragmented for Pushover limits), and only real success publishes run_pbs_verify_and_gc. Handled service errors allow remaining actions. The YAML's README explains installation, topics, settings and replay limitations. These actions call existing Home Assistant integrations; they do not implement PBS maintenance.
+
+## Build regression functions
+
+- `BuildTests.test_existing_bundle_refused()`: An existing deployment, including private settings, must never be overwritten.
+- `BuildTests.test_missing_dependency_refused()`: Missing build dependencies fail before starting a build or creating output.
+- `BuildTests.test_bundle_contents_and_cleanup()`: Collect app/MQTT/Tomli, copy only public deployment files and clean scratch work.
+- `BuildTests.test_failed_build_cleanup()`: Report failed compilation and remove scratch space without deleting partial output.
+- `BuildTests.fake_bundler()`: Represent successful PyInstaller output without running a compiler.

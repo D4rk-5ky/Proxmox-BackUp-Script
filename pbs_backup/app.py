@@ -36,7 +36,7 @@ def main() -> int:
         logger.error("'vzdump' not found. Run on a Proxmox VE node.")
         return 2
 
-    if notifications.mqtt is None:
+    if args.mqtt_enabled and notifications.mqtt is None:
         logger.error("paho-mqtt not installed. Install with: pip install paho-mqtt")
         return 2
 
@@ -64,9 +64,12 @@ def main() -> int:
     )
     duration_s = int(time.monotonic() - start_ts)
 
+    if not args.dry_run:
+        logger.info("Notification policy: MQTT enabled=%s on_success=%s; mail enabled=%s on_success=%s (vzdump handles real mail).",
+                    args.mqtt_enabled, args.mqtt_on_success, args.mail_enabled, args.mail_on_success)
     mqtt_result = "disabled"
     email_result = "disabled"
-    if args.dry_run and args.dry_run_email:
+    if args.dry_run and args.mail_enabled and args.dry_run_email:
         try:
             notifications.send_dry_run_email(
                 mailto=args.mailto, node=node, storage=args.storage, cmd=cmd,
@@ -78,7 +81,7 @@ def main() -> int:
             logger.error("Dry-run email failed: %s", e)
 
     # Each requested channel is attempted independently; never publish backup success for a preview.
-    if not args.dry_run or args.dry_run_mqtt:
+    if args.mqtt_enabled and (args.dry_run_mqtt if args.dry_run else (rc != 0 or args.mqtt_on_success)):
         try:
             notifications.publish_backup_status(
                 rc=rc,

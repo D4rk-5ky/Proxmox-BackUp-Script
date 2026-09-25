@@ -140,7 +140,7 @@ def publish_backup_status(
     mqtt_publish(
         host=mqtt_host,
         port=mqtt_port,
-        topic=mqtt_topic + "/dry-run" if dry_run else mqtt_topic,
+        topic=mqtt_topic,
         payload=payload,
         username=mqtt_user,
         password=mqtt_pass,

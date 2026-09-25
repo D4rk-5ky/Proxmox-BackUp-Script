@@ -77,11 +77,12 @@ def build_vzdump_cmd(args: argparse.Namespace) -> List[str]:
     if args.quiet:
         cmd += ["--quiet", "1"]
 
-    # Optional vzdump mail knobs (independent from MQTT)
-    if args.mailto:
-        cmd += ["--mailto", args.mailto]
-    if args.mailnotification:
-        cmd += ["--mailnotification", args.mailnotification]
+    # Force this job's mail policy rather than inheriting host success notifications.
+    # Empty mailto explicitly overrides recipients configured in /etc/vzdump.conf.
+    # This requires vzdump's notification-mode option (PVE 8.1+).
+    cmd += ["--notification-mode", "legacy-sendmail"]
+    cmd += ["--mailto", args.mailto if args.mail_enabled else ""]
+    cmd += ["--mailnotification", "always" if args.mail_enabled and args.mail_on_success else "failure"]
 
     return cmd
 

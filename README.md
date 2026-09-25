@@ -1,12 +1,12 @@
 # Proxmox → PBS backup with MQTT status
 
-Copy **`config.example.toml`** to **`config.toml`**, edit your settings, then run **`sudo ./pbs-backup`**. Settings flags are not needed. The app backs up VMs and containers through `vzdump`, keeps full logs in a **`logs/` folder beside the script**, writes **only error messages to `.err`**, and attempts to publish the backup result to MQTT.
+Copy **`config.example.toml`** to **`config.toml`**, edit your settings, then run **`sudo ./pbs-backup`**. Settings flags are not needed. The app backs up VMs and containers through `vzdump`, keeps full logs in a **`logs/` folder beside the script**, writes **only error messages to `.err`**, and sends enabled failure notifications. Success email and MQTT are disabled by default.
 
 ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk. Read the full disclaimer below before using this on real data.
 
 ## Installation and first run
 
-Run on a **Proxmox VE host**, not on PBS. Requirements are Python 3.9+, root, `vzdump`, and `paho-mqtt`. Running-guest filtering additionally needs `pvesh`. Configure your PBS datastore as a storage target in PVE before using the app.
+Run on a **Proxmox VE host**, not on PBS. Use Proxmox VE 8.1+ with `vzdump` supporting `--notification-mode legacy-sendmail`. Source runs require Python 3.9+ and root; enabled MQTT requires `paho-mqtt`. A PyInstaller bundle includes Python dependencies. Running-guest filtering additionally needs `pvesh`. Configure your PBS datastore as a storage target in PVE before using the app.
 
 Extract the **entire project** into one directory. Keep the executable `pbs-backup` beside the complete `pbs_backup/` package directory. Run the launcher, not individual `.py` modules. When updating, replace the launcher and package together and preserve your private `config.toml`; copying only the launcher is insufficient. No package installation is needed for the application itself.
 
@@ -50,14 +50,36 @@ Run a preview:
 sudo ./pbs-backup
 ```
 
-The shipped `dry_run = true` prints the resolved backup command and creates local logs. It never runs `vzdump`. MQTT and email are off by default; optional test notifications are described below and never report a successful backup. It still requires root, `vzdump`, and Paho; running-guest selection also performs a read-only inventory query. A preview does not test storage availability. Notification opt-ins can test MQTT publication or local email submission, subject to the delivery limits below.
+The shipped `dry_run = true` prints the resolved backup command and creates local logs. It never runs `vzdump`. MQTT and email are off by default; optional test notifications are described below and never report a successful backup. It still requires root and `vzdump`, plus Paho when MQTT is enabled; running-guest selection also performs a read-only inventory query. A preview does not test storage availability. Notification opt-ins can test MQTT publication or local email submission, subject to the delivery limits below.
 
 After reviewing the preview, change **`dry_run = false`** in `[BACKUP]` and run the same command to perform the backup.
 
+## Build a standalone executable with PyInstaller
+
+Build on Linux for deployment to Proxmox, using a compatible CPU architecture and a Linux environment no newer than the target's system libraries. PyInstaller does not cross-compile a macOS build into a Linux executable. The source ZIP contains the build script, not a prebuilt Proxmox binary. See [PyInstaller's operating model](https://pyinstaller.org/en/stable/operating-mode.html).
+
+```bash
+python3 -m venv .build-venv
+.build-venv/bin/python -m pip install -r requirements-build.txt
+.build-venv/bin/python build.py
+```
+
+The first command creates an isolated build environment; the second installs application dependencies, PyInstaller and Tomli; the third builds `dist/pbs-backup/`. On systems without venv support, install your distribution's Python venv package first. The build collects all `pbs_backup` and `paho.mqtt` modules and explicitly includes Tomli for older Python builds. It packages the Python runtime and libraries, not system `vzdump`, `pvesh` or sendmail.
+
+Deploy the **entire** `dist/pbs-backup/` directory, including `_internal/`. Inside it, copy `config.example.toml` to `config.toml`, configure it and run `sudo ./pbs-backup`. Config and default `logs/` are beside the executable, never inside `_internal/`. Private settings are external so editing them does not require rebuilding. The builder copies only the public example, README, legal text, version and Home Assistant example; it does not copy private configs or logs.
+
+`python build.py --help` explains `--output-dir PATH` (parent of the bundle, default project `dist/`) and `--work-dir PATH` (temporary build parent, default project `build/`). Explicit relative paths use the current directory. Temporary specs/cache/work are cleaned on exit. An existing output bundle is refused to protect private settings; choose a new output directory to rebuild. Failed builds may leave partial output, which you should inspect before removing. Building on macOS is allowed for local smoke checks only.
+
+## Home Assistant notifications
+
+The anonymous [automation](homeassistant/pbs-backup.yaml) and [setup guide](homeassistant/README.md) use the normal MQTT topic for dry-run, success and failure. Edit the YAML to choose Pushover/persistent notifications and full MQTT JSON for each outcome; no Python editing is needed. Configure the status and maintenance command topics and your Home Assistant integrations.
+
+**To receive real-success events or trigger the automation's success-only verify/GC request, set `MQTT.on_success = true`.** Its default false deliberately sends no success event. Failure notifications still work with enabled MQTT. Dry-run MQTT requires `BACKUP.dry_run_mqtt = true` and never triggers maintenance.
+
 ## Configuration rules and paths
 
-- The default config is `config.toml` beside the **real script file**, even when invoked from another working directory or through a symbolic link.
-- An alternative file is selected with `sudo ./pbs-backup --config /path/to/settings.toml`. A relative `--config` path starts at the shell's working directory.
+- The default config is `config.toml` beside the **real script or compiled executable**, even when invoked from another working directory or through a symbolic link.
+- An alternative file is selected with `sudo ./pbs-backup -c /path/to/settings.toml` (equivalent to `--config`). A relative `--config` path starts at the shell's working directory.
 - Relative `LOGGING.log_dir` values always start beside the script. Default `"logs"` creates that directory automatically. An absolute value explicitly selects another directory.
 - A relative `MQTT.cafile` value in TOML starts beside the selected TOML file. A CLI `--mqtt-cafile` override uses the working directory. `~` is expanded for TOML CA paths, config paths, and log directory paths.
 - Settings precedence is explicit CLI overrides, then TOML, then built-in defaults. Normal usage only needs TOML. Help displays built-in defaults, not your loaded file or password.
@@ -78,7 +100,7 @@ The ZIP retains `config.example.sh` and `pbs-backup.toml` to preserve existing p
 
 ## Every configuration option
 
-All 30 settings are present and commented in `config.example.toml`, ready to copy into `config.toml`. The tables show their meanings and optional CLI equivalents. Boolean CLI switches enable their setting; to disable a TOML-enabled boolean, edit TOML. `--no-all` is the explicit selection exception.
+All 34 settings are present and commented in `config.example.toml`, ready to copy into `config.toml`. The tables show their meanings and optional CLI equivalents. Boolean CLI switches enable their setting. Channel `enabled` and `on_success` settings also have explicit `--no-...` overrides; selection has `--no-all`. For other booleans, edit TOML to disable them.
 
 ### `[SELECTION]`
 
@@ -112,8 +134,8 @@ To back up all except 105, use `all = true`, `vmid = []`, and `exclude = [105]`.
 | `timeout` / `--timeout N` | `0` in TOML | `0` means no backup deadline; positive seconds bound the direct subprocess, including silent output and exit waiting. Example `14400`. CLI form requires a positive integer. |
 | `notes_template` / `--notes-template TEXT` | `""` | Optional literal PVE template, e.g. `"{{guestname}} on {{node}}"`; empty omits it. Other placeholders include `{{vmid}}` and `{{cluster}}`. |
 | `dry_run` / `--dry-run` | Shipped `true` | Preview without executing a backup. Set `false` to execute. If omitted, the built-in default is `false`. Notifications require the independent opt-ins below. |
-| `dry_run_mqtt` / `--dry-run-mqtt` | `false` | During dry-run only, send a labelled MQTT preview to `<MQTT.topic>/dry-run`, always non-retained. Uses existing broker/auth/TLS/QoS/timeout. Does not enable dry-run itself. |
-| `dry_run_email` / `--dry-run-email` | `false` | During dry-run only, submit a labelled test email via local `sendmail` to `MAIL.mailto`. Submission timeout: 30 seconds. Does not enable dry-run itself. |
+| `dry_run_mqtt` / `--dry-run-mqtt` | `false` | During dry-run only, send a labelled MQTT preview to the normal `MQTT.topic`, always non-retained; requires `MQTT.enabled = true`. Uses existing broker/auth/TLS/QoS/timeout. Does not enable dry-run itself. |
+| `dry_run_email` / `--dry-run-email` | `false` | During dry-run only, submit a labelled test email via local `sendmail` to `MAIL.mailto`; requires `MAIL.enabled = true`. Submission timeout: 30 seconds. Does not enable dry-run itself. |
 
 Running status is a snapshot: guests can stop or migrate after selection. A backup timeout kills/reaps **only the directly launched subprocess**, so Proxmox task workers may continue. Inspect the PVE task before retrying an interrupted run. This app does not unlock guests, terminate other jobs, override retention policies, or verify restores. PVE/storage settings still govern unexposed options.
 
@@ -121,10 +143,14 @@ Running status is a snapshot: guests can stop or migrate after selection. A back
 
 | Key / optional flag | Default | Purpose and example |
 | --- | --- | --- |
-| `mailto` / `--mailto RECIPIENTS` | `""` | Optional PVE email recipient(s), e.g. `"admin@example.com"`; independent of MQTT. |
-| `mailnotification` / `--mailnotification VALUE` | `""` | Optional policy passed through to installed PVE, commonly `"always"` or `"failure"`; empty uses host behavior. |
+| `enabled` / `--mail-enabled`, `--no-mail-enabled` | `false` | Master switch for real and preview email. Enabling requires `mailto`. |
+| `on_success` / `--mail-on-success`, `--no-mail-on-success` | `false` | When mail is enabled, send failures only. Set true to also send success mail. Does not govern opted-in previews. |
+| `mailto` / `--mailto RECIPIENTS` | `""` | Recipients, e.g. `"admin@example.com"`; ignored for delivery while mail is disabled. |
+| `mailnotification` / `--mailnotification VALUE` | `""` | Compatibility assertion. Leave empty to derive policy. If specified, must be `"failure"` when on_success=false or `"always"` when true; contradictions are rejected. |
 
-Real-backup email requires working PVE notification delivery. PVE's notification-system mode can ignore these legacy mail arguments. Dry-run email instead uses the local mail service directly, with the same `mailto` setting; it is independent of `mailnotification`.
+Real mail is handled by `vzdump`. The command explicitly selects `legacy-sendmail`, supplies recipients (an empty list when disabled), and derives `failure` or `always` from the settings. This prevents host notification defaults from bypassing the requested success policy. Host notification-system targets are not used for this invocation; host configuration is not edited. The host needs working mail delivery. See the [Proxmox notification implementation](https://raw.githubusercontent.com/proxmox/pve-manager/master/PVE/VZDump.pm).
+
+Enabled mail with `on_success = false` still requests failure email from vzdump. Configuration/preflight failures, launch failures and forcibly terminated jobs cannot guarantee a vzdump email; check exit status and logs. MQTT also begins only after runtime preflight. Dry-run email uses local sendmail separately and requires its own opt-in.
 
 ### `[LOGGING]`
 
@@ -147,9 +173,11 @@ Logs are initialized after config validation and before runtime preflight, so ro
 
 | Key / optional flag | Default | Purpose and example |
 | --- | --- | --- |
-| `host` / `--mqtt-host HOST` | Required | Broker hostname/IP, e.g. `"mqtt.example.lan"`. No URL scheme. |
+| `enabled` / `--mqtt-enabled`, `--no-mqtt-enabled` | `true` | Master switch. When false, no MQTT sends or Paho/broker requirement, including previews. |
+| `on_success` / `--mqtt-on-success`, `--no-mqtt-on-success` | `false` | Enabled MQTT always attempts real-backup failure publication. Set true to also publish success; preview opt-in is independent. |
+| `host` / `--mqtt-host HOST` | Required when enabled | Broker hostname/IP, e.g. `"mqtt.example.lan"`. No URL scheme. |
 | `port` / `--mqtt-port N` | `1883` | Integer 1–65535; TLS does not change it automatically. |
-| `topic` / `--mqtt-topic TOPIC` | Required | Publish topic, e.g. `"proxmox/backup/pve1"`. Empty values, NUL, and `+`/`#` wildcards are rejected. |
+| `topic` / `--mqtt-topic TOPIC` | Required when enabled | Publish topic, e.g. `"proxmox/backup/pve1"`. Empty values, NUL, and `+`/`#` wildcards are rejected. |
 | `user` / `--mqtt-user USER` | `""` | Optional username; empty selects anonymous connection. |
 | `pass` / `--mqtt-pass PASSWORD` | `""` | Optional password, requiring a username when set. Prefer TOML so it does not appear in process arguments/history. |
 | `qos` / `--mqtt-qos N` | `1` | `0`: local send; `1`: at least once; `2`: exactly once at MQTT protocol level. QoS 0 has no broker acknowledgement. |
@@ -173,12 +201,13 @@ dry_run_mqtt = true
 dry_run_email = true
 
 [MAIL]
+enabled = true
 mailto = "admin@example.com"
 ```
 
-Keep your existing `BACKUP.storage` and `[MQTT]` settings configured. Run the same command, `sudo ./pbs-backup`. Set either notification option back to `false` to disable that channel. With `dry_run = false`, these two options are ignored: real backups retain their normal MQTT and `vzdump` email behavior, with no extra test email.
+Keep your existing `BACKUP.storage` and `[MQTT]` settings configured, with `MQTT.enabled = true`. Run the same command, `sudo ./pbs-backup`. Set either notification option back to `false` to disable that channel. With `dry_run = false`, these two options are ignored: real backups use each channel’s master switch and success policy, with no extra test email.
 
-**MQTT preview:** the existing connection settings are reused, but the destination is the configured topic with `/dry-run` appended. For example, `proxmox/backup/pve1` becomes `proxmox/backup/pve1/dry-run`. Messages are never retained, even if `MQTT.retain = true`; the last real retained backup result is left intact. Broker permissions must allow that preview topic. Subscribe to the preview topic when testing.
+**MQTT preview:** uses exactly the configured `MQTT.topic`, shared with real success/failure messages. No suffix is added. It is always non-retained, even when `MQTT.retain = true`. Consumers must distinguish `status: "dry-run"` and the markers below before taking action. A non-retained preview does not erase an older retained real result on the broker.
 
 The preview payload keeps node/storage/timing/log fields and adds these explicit markers:
 
@@ -198,19 +227,19 @@ The preview payload keeps node/storage/timing/log fields and adds these explicit
 
 The host needs a configured sendmail-compatible mail service, found in PATH or at `/usr/sbin/sendmail`. The script submits the message using `sendmail -i -t` with a fixed 30-second submission timeout. It does not invoke `vzdump` to generate mail or configure the relay. The invoking root user's envelope identity and local mail-service configuration control delivery; `mailnotification = "failure"` does not suppress an explicitly requested test message. Successful submission means the local service accepted it, not that the recipient's inbox received it. See the [Postfix sendmail interface](https://raw.githubusercontent.com/vdukhovni/postfix/master/postfix/man/man1/sendmail.1).
 
-After config and runtime preflight succeed, every enabled notification channel is attempted once, independently. A send/submission failure is logged to `.err` and makes the dry-run exit **3**; the other enabled channel is still attempted. Missing/invalid recipients fail configuration validation with exit 2 before notifications. Preflight failures (including empty guest selection) still stop the run before any notification. No notification option bypasses root/tool/Paho checks or permits a dry-run backup.
+After config and runtime preflight succeed, every enabled notification channel is attempted once, independently. A send/submission failure is logged to `.err` and makes the dry-run exit **3**; the other enabled channel is still attempted. Missing/invalid recipients fail configuration validation with exit 2 before notifications. Preflight failures (including empty guest selection) still stop the run before any notification. No notification option bypasses root/tool checks or the enabled-MQTT Paho check or permits a dry-run backup.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `sudo ./pbs-backup` | Load adjacent TOML, initialize logs, validate runtime prerequisites, then preview or execute according to `BACKUP.dry_run`. |
-| `sudo ./pbs-backup --config /path/to/settings.toml` | Use a different TOML file; does not relocate the default logs folder. |
+| `sudo ./pbs-backup -c /path/to/settings.toml` (equivalent to `--config`) | Use a different TOML file; does not relocate the default logs folder. |
 | `./pbs-backup -h` or `./pbs-backup --help` | Explain all optional CLI overrides and built-in defaults, then exit without reading TOML. |
 | `./pbs-backup --version` | Print version and exit. |
 | `sudo ./pbs-backup --dry-run` | Force preview mode for one invocation; TOML notification opt-ins still apply. |
 | `sudo ./pbs-backup --dry-run --dry-run-mqtt` | Force a preview and enable its MQTT test message. |
-| `sudo ./pbs-backup --dry-run --dry-run-email --mailto admin@example.com` | Force a preview and enable its email test. |
+| `sudo ./pbs-backup --dry-run --mail-enabled --dry-run-email --mailto admin@example.com` | Force a preview and enable its email test. |
 | `python3 pbs-backup ...` | Use an explicitly chosen Python interpreter; real runs still need root. |
 | `cp -n config.example.toml config.toml` | Create private settings without overwriting an existing file. |
 | `chmod 600 config.toml` | Restrict read/write access to the file owner before storing credentials. |
@@ -221,7 +250,7 @@ After config and runtime preflight succeed, every enabled notification channel i
 
 ## MQTT status, exit codes, and troubleshooting
 
-A real backup attempts one normal status publication. Opted-in dry-run publication uses the distinct preview topic and payload described above. Example after a clean success:
+Enabled MQTT attempts one failure publication after a real backup fails; success publication additionally requires on_success=true. Opted-in dry-run publication uses the same normal topic with the preview payload above. Example when success publication is enabled:
 
 ```json
 {
