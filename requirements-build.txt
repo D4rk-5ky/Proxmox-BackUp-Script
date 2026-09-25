@@ -1,0 +1,5 @@
+-r requirements.txt
+# Build dependencies only; never required on the target frozen application host.
+pyinstaller>=6.11,<7
+# Always collect fallback TOML support, even when building with Python 3.11+.
+tomli>=2,<3

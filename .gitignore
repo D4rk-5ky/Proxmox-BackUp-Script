@@ -3,3 +3,5 @@ config*
 ! config.example.toml
 
 logs/
+
+__pycache__/

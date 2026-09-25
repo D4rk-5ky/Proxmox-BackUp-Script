@@ -3,10 +3,10 @@
 # config.toml loads automatically; config.example.toml is the only Git-allowed config.
 # First setup: cp -n config.example.toml config.toml; chmod 600 config.toml
 # Edit config.toml, then run: sudo ./pbs-backup
-# Alternative file: sudo ./pbs-backup --config /path/to/config.toml
+# Alternative file: sudo ./pbs-backup -c /path/to/config.toml (same as --config)
 # CLI settings remain optional overrides: flags > this file > built-in defaults.
 # Inspection only: ./pbs-backup --help (or -h) and ./pbs-backup --version.
-# --config, --help and --version select/inspect the program, so are not TOML keys.
+# -c / --config, --help and --version select/inspect the program, so are not TOML keys.
 # Categories are case-insensitive; keys must stay lowercase. Do not repeat a
 # category with different casing (e.g. [MQTT] and [mqtt]); that is rejected.
 # Unknown sections/keys and wrong value types are rejected before any backup.
@@ -71,36 +71,48 @@ notes_template = ""
 # --dry-run: true previews with local logs but NEVER executes a backup.
 # MQTT/email are off unless the separate opt-ins below are enabled.
 # This distributed example uses true for review; built-in default remains false.
-# Root/vzdump/Paho checks still apply. Set false after reviewing the preview.
+# Root/vzdump checks still apply; enabled MQTT also requires Paho. Set false after reviewing the preview.
 dry_run = true
 
 # --dry-run-mqtt: during dry-run only, send a clearly labelled MQTT preview.
-# Default: false. Uses [MQTT] broker/auth/TLS/QoS/timeout, topic + "/dry-run",
-# and retain=false even if MQTT.retain=true. status="dry-run", rc=null,
+# Default: false. Requires MQTT.enabled=true; uses the NORMAL MQTT.topic,
+# broker/auth/TLS/QoS/timeout, and retain=false even if MQTT.retain=true. status="dry-run", rc=null,
 # dry_run=true, backup_executed=false; never reports a successful backup.
 # Ignored during real backups. Does not enable dry_run itself.
 dry_run_mqtt = false
 
 # --dry-run-email: during dry-run only, submit a clearly labelled test email.
-# Default: false. Requires [MAIL].mailto and a configured local sendmail service.
+# Default: false. Requires MAIL.enabled=true, MAIL.mailto and local sendmail.
 # Uses bare comma-separated email addresses or simple local aliases (e.g. root).
 # Submission timeout: 30 seconds. Subject/body say NO BACKUP EXECUTED.
-# Independent of dry_run_mqtt; real vzdump email behavior is unchanged.
+# Independent of dry_run_mqtt and MAIL.on_success; no backup is executed.
 # mailnotification does not suppress this explicitly requested test message.
 # A failed requested notification returns exit 3; the other channel is still tried.
 # Ignored during real backups. Does not enable dry_run itself.
 dry_run_email = false
 
 [MAIL]
-# --mailto: optional Proxmox email recipients, e.g. "admin@example.com".
-# Empty = omitted (default). Requires configured PVE notification delivery.
-# Real backups: independent of MQTT; PVE notification-system mode may ignore it.
-# Dry-run email: required when BACKUP.dry_run_email=true. Reuses these recipients
-# with local sendmail; PVE user IDs are not resolved through PVE notifications.
+# --mail-enabled / --no-mail-enabled: master mail switch. Default: false.
+# True requires mailto below. False suppresses real and preview mail from this app.
+# Real runs explicitly clear vzdump recipients when disabled; host defaults cannot
+# re-enable this job's notifications. Requires PVE 8.1+ notification-mode support.
+enabled = false
+
+# --mail-on-success / --no-mail-on-success: send real success mail. Default: false.
+# When enabled=true, failures still send even when on_success=false.
+# Previews instead require BACKUP.dry_run_email=true and are clearly labelled.
+on_success = false
+
+# --mailto: recipients used by vzdump legacy-sendmail when mail is enabled.
+# Example: "admin@example.com". Empty is allowed only when enabled=false.
+# Real mail supports installed PVE recipient syntax; preview mail requires bare
+# comma-separated ASCII addresses or local aliases (e.g. "root"), not PVE user IDs.
 mailto = ""
 
-# --mailnotification: optional policy passed through to installed Proxmox.
-# Common values: "always" or "failure". Empty = host policy (default).
+# --mailnotification: optional compatibility assertion, not a policy override.
+# Empty (recommended) derives "failure" when on_success=false and "always" when
+# on_success=true. If specified, it MUST match that policy; conflicts are rejected.
+# It cannot turn mail on when enabled=false or control explicit preview email.
 mailnotification = ""
 
 [LOGGING]
@@ -116,16 +128,25 @@ log_dir = "logs"
 log_prefix = "pbs-backup"
 
 [MQTT]
-# --mqtt-host: REQUIRED broker hostname/IP, e.g. "mqtt.example.lan".
-# Empty blocks execution. Never include a URL scheme such as mqtt://.
+# --mqtt-enabled / --no-mqtt-enabled: master MQTT switch. Default: true.
+# Enabled requires host, topic and Paho; disabled sends neither results nor previews.
+enabled = true
+
+# --mqtt-on-success / --no-mqtt-on-success: publish real success. Default: false.
+# Failures still publish when enabled=true. To drive Home Assistant's success-only
+# verify/GC automation, set this true. Previews instead use BACKUP.dry_run_mqtt.
+on_success = false
+
+# --mqtt-host: REQUIRED when enabled=true; broker hostname/IP, e.g. "mqtt.example.lan".
+# Empty blocks execution only when enabled. Never include a URL scheme such as mqtt://.
 host = ""
 
 # --mqtt-port: integer 1..65535. Default: 1883.
 # TLS does not change this automatically; often set 8883 when tls = true.
 port = 1883
 
-# --mqtt-topic: REQUIRED nonempty publish topic, e.g. "proxmox/backup/pve1".
-# +/# wildcards and NUL are rejected. Empty blocks execution.
+# --mqtt-topic: REQUIRED when enabled=true; nonempty publish topic, e.g. "proxmox/backup/pve1".
+# +/# wildcards and NUL are rejected. Previews use this same topic, non-retained.
 topic = ""
 
 # --mqtt-user: optional broker username. Empty = anonymous (default).

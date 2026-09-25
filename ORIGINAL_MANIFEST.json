@@ -2,7 +2,7 @@
   "source_archive": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next.zip",
   "source_archive_sha256": "922078bf8b048324faec640faf5ef71c9d142bd19694c1dd8921b2304722b997",
   "source_archive_comment": "c34cea5811adba2f9f5cfac4d80eb4632439a277",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "original_files": [
     {
       "archive_path": "Proxmox-BackUp-Script-Proxmox-BackUp-Script-Next/README.md",
@@ -31,9 +31,12 @@
     "VERIFICATION.md",
     "VERSION",
     "VERSIONING.md",
+    "build.py",
     "commented_code_map.md",
     "config.example.sh",
     "config.example.toml",
+    "homeassistant/README.md",
+    "homeassistant/pbs-backup.yaml",
     "pbs-backup.toml",
     "pbs_backup/__init__.py",
     "pbs_backup/app.py",
@@ -41,7 +44,9 @@
     "pbs_backup/cli.py",
     "pbs_backup/logging_utils.py",
     "pbs_backup/notifications.py",
+    "requirements-build.txt",
     "requirements.txt",
+    "tests/test_build.py",
     "tests/test_pbs_backup.py"
   ],
   "verification_basis": "Preserved original extracted files rehashed against recorded digests; original Downloads ZIP unavailable for a new whole-archive hash."

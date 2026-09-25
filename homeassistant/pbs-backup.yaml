@@ -1,0 +1,199 @@
+# Replace the existing automation in Home Assistant's "Edit in YAML" editor.
+# Generic example for pbs-backup 0.0.6. No Python changes required.
+# Before use, change both topic values to match your existing MQTT setup.
+# All results, including previews, arrive on the same normal status topic.
+# MQTT.on_success must be true for the script to emit real-success events.
+# Runtime JSON still contains the node, storage and paths supplied by the script.
+alias: Proxmox PBS backup results and dry-run notifications
+description: >-
+  Backup and dry-run notifications with optional MQTT JSON in both channels.
+  Only a valid real success may request PBS verification and garbage collection.
+
+# NOTIFICATION SETTINGS: true enables, false disables (no quotes).
+variables:
+  notification_settings:
+    dry_run:
+      pushover: true
+      persistent: true
+    success:
+      pushover: true
+      persistent: true
+    failure:
+      pushover: true
+      persistent: true
+  # Include the received MQTT payload, preserving numbers, booleans and null.
+  # These two format switches apply to all three outcomes independently of delivery.
+  pushover_include_mqtt_json: true
+  persistent_include_mqtt_json: true
+  # JSON off: still send readable status, host/storage, timings and log paths.
+  # Disabling notifications never disables real-success verification/GC.
+
+triggers:
+  - trigger: mqtt
+    topic: proxmox/backup/status
+    id: backup
+conditions: []
+actions:
+  - variables:
+      mqtt_event: "{{ trigger | default({}) }}"
+      # Define these before choose so branch assignments remain available afterwards.
+      outcome: unknown
+      notification_intro: ""
+      notification_title: ""
+      pushover_title: ""
+  - variables:
+      payload: >-
+        {{ mqtt_event.payload_json
+           if mqtt_event.payload_json is defined and mqtt_event.payload_json is mapping
+           else {} }}
+  - variables:
+      status: "{{ payload.get('status', 'unknown') }}"
+      rc: "{{ payload.get('rc') }}"
+      node: "{{ payload.get('node', 'unknown') }}"
+      storage: "{{ payload.get('storage', 'unknown') }}"
+      duration: "{{ payload.get('duration_s', 'unknown') }}"
+      ts: "{{ payload.get('ts', 'unknown') }}"
+      log_file: "{{ payload.get('log_file') or '(none)' }}"
+      err_file: "{{ payload.get('err_file') or '(none)' }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ mqtt_event.get('id') == 'backup'
+                 and status == 'dry-run'
+                 and payload.get('dry_run') is sameas true
+                 and payload.get('backup_executed') is sameas false
+                 and 'rc' in payload and payload.get('rc') is none
+                 and payload.get('preview_rc') is integer }}
+        sequence:
+          - variables:
+              outcome: "dry_run"
+              notification_intro: "DRY-RUN: NO BACKUP EXECUTED. Verification/GC NOT requested."
+              notification_title: "🧪 Proxmox DRY-RUN ({{ node }})"
+              pushover_title: "Proxmox PBS Backup — DRY-RUN"
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ mqtt_event.get('id') == 'backup'
+                 and status == 'success'
+                 and payload.get('rc') is integer and payload.get('rc') == 0
+                 and payload.get('dry_run', false) is sameas false
+                 and payload.get('backup_executed', true) is sameas true
+                 and 'preview_rc' not in payload }}
+        sequence:
+          - variables:
+              outcome: "success"
+              notification_intro: "Full Backup Complete."
+              notification_title: "✅ Proxmox backup OK ({{ node }})"
+              pushover_title: "Proxmox PBS Backup"
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ mqtt_event.get('id') == 'backup'
+                 and status == 'error'
+                 and payload.get('rc') is integer and payload.get('rc') != 0
+                 and payload.get('dry_run', false) is sameas false
+                 and payload.get('backup_executed', true) is sameas true
+                 and 'preview_rc' not in payload }}
+        sequence:
+          - variables:
+              outcome: "failure"
+              notification_intro: "Backup FAILED. Verification/GC NOT requested."
+              notification_title: "❌ Proxmox backup FAILED ({{ node }}) rc={{ rc }}"
+              pushover_title: "Proxmox PBS Backup — FAILED"
+    default:
+      # Unknown/manual/invalid events still warn locally, regardless of outcome switches.
+      - action: persistent_notification.create
+        data:
+          title: "⚠️ Proxmox backup: unknown or inconsistent payload"
+          message: |-
+            No PBS verification or garbage collection was requested.
+            Topic: {{ mqtt_event.get('topic', '(no MQTT trigger)') }}
+            Payload: {{ mqtt_event.get('payload', '(none — manual run)') }}
+
+  # One shared notification path for all valid outcomes avoids three duplicated formats.
+  - if:
+      - condition: template
+        value_template: "{{ outcome in ['dry_run', 'success', 'failure'] }}"
+    then:
+      - variables:
+          notification_details: |-
+            Node: {{ node }}
+            Storage: {{ storage }}
+            Duration: {{ duration }}s
+            Time: {{ ts }}
+            {% if outcome == 'dry_run' %}Backup rc: null (no backup)
+            Preview preparation rc: {{ payload.get('preview_rc') }}{% else %}Backup rc: {{ rc }}{% endif %}
+            Log: {{ log_file }}
+            Err: {{ err_file }}
+      - if:
+          - condition: template
+            value_template: "{{ notification_settings[outcome]['persistent'] }}"
+        then:
+          - action: persistent_notification.create
+            continue_on_error: true
+            data:
+              title: "{{ notification_title }}"
+              message: |-
+                {{ notification_intro }}
+                {{ notification_details }}
+                {% if persistent_include_mqtt_json %}
+                MQTT JSON:
+                ```json
+                {{ payload | to_json(pretty_print=True) }}
+                ```
+                {% endif %}
+      - if:
+          - condition: template
+            value_template: "{{ notification_settings[outcome]['pushover'] }}"
+        then:
+          - variables:
+              # Pushover allows 1024 characters per message. Normal JSON uses one push.
+              # Oversized JSON uses numbered, valid JSON envelopes; no payload is lost.
+              # Concatenate their mqtt_json_fragment strings in part order to recover it.
+              pushover_messages: >-
+                {%- set ns = namespace(messages=[]) -%}
+                {%- if pushover_include_mqtt_json -%}
+                  {%- set json_text = payload | to_json(ensure_ascii=True) -%}
+                  {%- set message = notification_intro ~ '\nMQTT JSON:\n' ~ json_text -%}
+                  {%- if message | length <= 1024 -%}
+                    {%- set ns.messages = [message] -%}
+                  {%- else -%}
+                    {%- set parts = ((json_text | length + 359) // 360) -%}
+                    {%- for start in range(0, json_text | length, 360) -%}
+                      {%- set envelope = {'part': loop.index, 'parts': parts,
+                         'mqtt_json_fragment': json_text[start:start + 360]} -%}
+                      {%- set ns.messages = ns.messages + [notification_intro ~
+                         '\nMQTT JSON (numbered fragment):\n' ~
+                         (envelope | to_json(ensure_ascii=True))] -%}
+                    {%- endfor -%}
+                  {%- endif -%}
+                {%- else -%}
+                  {%- set message = notification_intro ~ '\n' ~ notification_details -%}
+                  {%- set ns.messages = [message if message | length <= 1024 else
+                     message[:980] ~ '\n[Details shortened for Pushover]'] -%}
+                {%- endif -%}
+                {{ ns.messages }}
+          - repeat:
+              for_each: "{{ pushover_messages }}"
+              sequence:
+                - action: notify.pushover
+                  continue_on_error: true
+                  data:
+                    title: "{{ pushover_title }}"
+                    message: "{{ repeat.item }}"
+
+  # Notification switches and handled delivery failures cannot suppress this request.
+  # outcome becomes success ONLY through the original strict real-success guard above.
+  - if:
+      - condition: template
+        value_template: "{{ outcome == 'success' }}"
+    then:
+      - action: mqtt.publish
+        data:
+          qos: 0
+          retain: false
+          topic: proxmox/pbs/commands
+          payload: run_pbs_verify_and_gc
+mode: queued
+max: 10

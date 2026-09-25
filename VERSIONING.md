@@ -4,7 +4,17 @@ This is the canonical versioning.md document, named `VERSIONING.md`. Keep histor
 
 ## Release rules
 
-Every created release advances exactly one patch step. Starting with `major.minor.patch`, increment patch by one while it is below 99. At 99, increment minor and reset patch to zero: **0.0.99 → 0.1.0**, never 0.0.100. The current release is 0.0.5; the next release is 0.0.6. Keep `VERSION`, `pbs_backup.__version__`, this record, verification, and ZIP name consistent. Update CLI/config examples and the code map for every changed option/function. Do not create intermediate numbered releases for working edits.
+Every created release advances exactly one patch step. Starting with `major.minor.patch`, increment patch by one while it is below 99. At 99, increment minor and reset patch to zero: **0.0.99 → 0.1.0**, never 0.0.100. The current release is 0.0.6; the next release is 0.0.7. Keep `VERSION`, `pbs_backup.__version__`, this record, verification, and ZIP name consistent. Update CLI/config examples and the code map for every changed option/function. Do not create intermediate numbered releases for working edits.
+
+## 0.0.6 — 2026-09-25
+
+- Add `-c` as an exact `--config` alias. Frozen applications resolve external config/logs beside the executable; source paths retain existing behavior.
+- Add strict TOML MAIL.enabled (false), MQTT.enabled (true), and each channel's on_success (false), plus positive/negative CLI overrides. Enabled channels retain failure delivery; opted-in dry-run sends require the master switch and ignore on_success. Disabled MQTT no longer requires Paho/host/topic. Selection/root/tool/logging guards remain.
+- Derive real-mail policy using explicit vzdump legacy-sendmail mode, empty recipients when disabled, and failure/always according to settings. Keep mailnotification as a validated compatibility assertion; contradictory settings fail. This requires notification-mode support (PVE 8.1+); preflight/launch/terminated-job email is not guaranteed.
+- Publish dry-run on exactly the normal topic, with unchanged explicit preview markers and retain=false. Update and include the anonymous Home Assistant YAML: one status trigger, strict outcome guards, configurable Pushover/persistent JSON and success-only maintenance. MQTT.on_success must be true for success events to reach that automation.
+- Add build.py and requirements-build.txt for native PyInstaller onedir builds collecting app, Paho MQTT and Tomli modules. Refuse existing destination bundles; isolate/clean temporary build work; copy only public deployment files. Keep private config/logs external. Ignore local build environment/spec files.
+- Update all 34 commented settings in both preserved TOML examples, Bash overrides, current-usage README with original disclaimer, full function/command map, regression checks and manifests. Preserve every original/prior file path. No backup engine or speculative maintenance modules added.
+- Verify offline notification matrices, frozen paths, build safeguards and native macOS packaging. Linux/PVE execution, actual backup/restore and live notification delivery remain target-host checks; details in VERIFICATION.md.
 
 ## 0.0.5 — 2026-09-25
 
